@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Кванта</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='26' fill='%230b0d12' stroke='%2322d3ee' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='10' fill='%237c5cff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body data-mode="standard">
+<div class="boot" id="boot">
+  <div class="boot-noise"></div>
+  <div class="boot-core">
+    <span class="ring r1"></span><span class="ring r2"></span><span class="ring r3"></span>
+    <span class="core"></span>
+  </div>
+  <div class="boot-title">Кванта</div>
+  <div class="boot-sub">ЦИФРОВОЙ НАПАРНИК</div>
+  <div class="boot-log" id="bootLog">Подключаюсь…</div>
+  <div class="boot-bar"><i id="bootBar"></i></div>
+  <div class="boot-skip" id="bootSkip">нажми, чтобы пропустить</div>
+</div>
+
+<div class="app" id="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-mark"><span></span></div>
+      <div class="brand-text"><b>Кванта</b><small>пространство для диалога</small></div>
+    </div>
+    <button class="new-chat" id="newChatBtn"><span>+</span> Новый чат</button>
+    <div class="side-label">НЕДАВНИЕ ДИАЛОГИ</div>
+    <div class="chat-list" id="chatList"></div>
+    <div class="side-spacer"></div>
+    <div class="side-actions">
+      <button data-open="memory"><span class="ico">✦</span><span>Память</span></button>
+      <button data-open="projects"><span class="ico">▣</span><span>Проекты</span></button>
+      <button data-open="notes"><span class="ico">◫</span><span>Заметки</span></button>
+      <button data-open="reminders"><span class="ico">◷</span><span>Напоминания</span></button>
+      <button data-open="workflows"><span class="ico">⌘</span><span>Сценарии</span></button>
+      <button data-open="actions"><span class="ico">↶</span><span>История действий</span></button>
+      <button data-open="diagnostics"><span class="ico">◉</span><span>Диагностика</span></button>
+      <button data-open="analytics"><span class="ico">◔</span><span>Статистика</span></button>
+      <button data-open="settings"><span class="ico">⚙</span><span>Настройки</span></button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="top-left">
+        <button class="icon-btn only-mobile" id="sidebarToggle" title="Меню">☰</button>
+        <div class="mini-orb only-mini" id="miniOrb"><i></i><i></i><i></i></div>
+        <div class="chat-title" id="chatTitle">Новый чат</div>
+        <span class="mode-chip" id="modeChip">Умный</span>
+      </div>
+      <div class="top-right">
+        <select class="select resource-profile-select" id="resourceProfileSelect" title="Профиль ресурсов: работа или игра">
+          <option value="work">Работа</option>
+          <option value="game">Игра</option>
+        </select>
+        <select class="select model-select" id="modelSelect" title="Модель"></select>
+        <select class="select access-select" id="accessSelect" title="Режим доступа">
+          <option value="safe">Безопасный</option>
+          <option value="smart">Умный</option>
+          <option value="auto">Авто</option>
+        </select>
+        <button class="tone-toggle" id="seriousModeBtn" type="button" aria-pressed="false" title="Включить серьёзный режим">
+          <span aria-hidden="true">◐</span><span>Серьёзный</span>
+        </button>
+        <div class="view-switch" role="group" aria-label="Режим интерфейса">
+          <button data-view="hud" title="Полное рабочее пространство">◈</button>
+          <button data-view="standard" title="Обычное окно">▣</button>
+          <button data-view="mini" title="Компактное окно">●</button>
+        </div>
+        <button class="icon-btn only-mini" id="expandBtn" title="Развернуть HUD">⤢</button>
+        <button class="icon-btn" id="settingsBtn" title="Настройки">⚙</button>
+      </div>
+    </header>
+
+    <div class="content">
+      <section class="chat-panel">
+        <div class="chat-scroll" id="chatScroll">
+          <div class="welcome" id="welcome">
+            <div class="welcome-orb">
+              <span class="w-ring w1"></span><span class="w-ring w2"></span><span class="w-ring w3"></span>
+              <span class="w-core">Q</span>
+            </div>
+            <h1>Кванта на связи</h1>
+            <p>Можно обсудить задачу, разобрать идею или просто поговорить.</p>
+            <div class="suggestions">
+              <button data-prompt="Помоги разложить эту идею на понятные шаги.">Разобрать идею</button>
+              <button data-prompt="Объясни сложную тему простыми словами и на примере.">Объяснить тему</button>
+              <button data-prompt="Помоги написать короткий, живой текст на эту тему.">Написать текст</button>
+              <button data-prompt="Давай просто поговорим. Задай интересный вопрос.">Поговорить</button>
+            </div>
+            <div class="welcome-note">Кванта помогает с вопросами, идеями и повседневными задачами. Действия с файлами и приложениями остаются под контролем пользователя.</div>
+          </div>
+          <div class="messages" id="messages"></div>
+        </div>
+        <div class="composer-wrap">
+          <div class="composer" id="composer">
+            <button class="mic" id="micBtn" title="Голосовой ввод">◉</button>
+            <textarea id="input" rows="1" placeholder="Напиши Кванте…" autocomplete="off"></textarea>
+            <button class="send-btn" id="sendBtn" title="Отправить">➤</button>
+            <button class="stop-btn hidden" id="stopBtn" title="Остановить">■</button>
+          </div>
+          <div class="composer-hint"><span>Enter — отправить · Shift+Enter — новая строка</span><span id="hintRight"></span></div>
+        </div>
+      </section>
+
+      <aside class="telemetry" id="telemetry" aria-label="Состояние Кванты">
+        <div class="orb-wrap">
+          <canvas id="orbCanvas" width="300" height="300" aria-hidden="true"></canvas>
+          <div class="orb-caption" id="orbCaption">НА СВЯЗИ</div>
+        </div>
+        <div class="presence-state" id="presenceCard" aria-live="polite">
+          <span class="presence-indicator"></span>
+          <div><strong id="presenceState">Свободна</strong><span id="presenceDetail">На связи и готова к разговору</span></div>
+        </div>
+        <section class="presence-section">
+          <div class="presence-heading">СЕЙЧАС</div>
+          <div class="presence-activity" id="presenceActivity">Можно начать новый разговор или продолжить текущий.</div>
+        </section>
+        <section class="presence-section">
+          <div class="presence-heading">БЫСТРЫЕ СЦЕНАРИИ</div>
+          <div class="protocols" id="workflowQuickActions"></div>
+          <button class="presence-link" data-open="workflows" type="button">Все сценарии <span>→</span></button>
+        </section>
+        <div class="presence-local">
+          <span class="presence-local-mark">✦</span>
+          <div><strong>Контроль остаётся у пользователя</strong><small>История и настройки хранятся на устройстве</small></div>
+        </div>
+        <div class="side-footer presence-connection">
+          <span class="dot" id="statusDot"></span>
+          <span id="statusText">проверка соединения…</span>
+        </div>
+        <div class="telemetry-legacy hidden" aria-hidden="true">
+          <div class="clock"><div class="clock-time" id="clockTime">--:--</div><div class="clock-date" id="clockDate">—</div></div>
+          <div class="weather-card" id="weatherCard"><div class="weather-top"><span id="weatherCity">—</span><span id="weatherIcon">◌</span></div><div class="weather-temp" id="weatherTemp">—</div><div class="weather-desc" id="weatherDesc">—</div><div class="weather-range" id="weatherRange"></div></div>
+          <div class="meter-row"><span>CPU</span><div class="meter"><i id="cpuBar"></i></div><b id="cpuVal">0%</b></div><div class="meter-row"><span>RAM</span><div class="meter"><i id="ramBar"></i></div><b id="ramVal">0%</b></div><div class="meter-row"><span>DISK</span><div class="meter"><i id="diskBar"></i></div><b id="diskVal">0%</b></div>
+          <div id="batteryVal"></div><div id="uptimeVal"></div><div id="activeApp"></div><div id="activeTitle"></div>
+          <span id="version">0.1</span><span id="dataDir">data</span>
+        </div>
+      </aside>
+    </div>
+  </main>
+</div>
+
+<div class="drawer hidden" id="drawer">
+  <div class="drawer-head"><h2 id="drawerTitle">Заметки</h2><button class="icon-btn" id="drawerClose">×</button></div>
+  <div class="drawer-body" id="drawerBody"></div>
+</div>
+<div class="modal-root" id="modalRoot"></div>
+<div class="toasts" id="toasts"></div>
+<script src="/ui/app.js"></script>
+</body>
+</html>

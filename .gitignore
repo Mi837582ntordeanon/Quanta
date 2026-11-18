@@ -1,0 +1,37 @@
+# Per-user state: chats, settings, browser profile, generated media and models
+/data/
+
+# Python bytecode and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Local configuration and logs
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+
+# Downloaded models, caches and generated build artifacts
+/.cache/
+/cache/
+/models/
+/build/
+/dist/
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.wav
+*.mp3
+*.ogg
+
+# One-off local inspection scripts
+/_voice_blob_check.py
+/_voice_fs_check.py
+/Текстовый документ.txt
