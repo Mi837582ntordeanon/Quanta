@@ -1,0 +1,2 @@
+# Reproducible Windows bundle builder. Kept separate from runtime dependencies.
+pyinstaller==6.22.3

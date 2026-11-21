@@ -1,0 +1,79 @@
+name: Quanta checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run platform-independent tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Check Python and JavaScript syntax
+        run: |
+          python -m compileall -q server.py assistant tests
+          node --check ui/app.js
+          node --check assistant/minecraft_bot.js
+
+      - name: Lint Python
+        run: ruff check .
+
+      - name: Audit Python dependencies
+        run: pip-audit -r requirements.txt -r requirements-build.txt -r requirements-dev.txt
+
+  windows-tests:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Install Minecraft companion dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run scenario and unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Check Python and JavaScript syntax
+        run: |
+          python -m compileall -q server.py assistant tests
+          node --check ui/app.js
+          node --check assistant/minecraft_bot.js
+
+      - name: Audit production Node dependencies
+        run: npm audit --omit=dev --audit-level=moderate

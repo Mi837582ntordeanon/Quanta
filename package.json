@@ -1,0 +1,15 @@
+{
+  "name": "quanta-minecraft-companion",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Optional local Mineflayer companion for Quanta-managed offline Minecraft servers",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "mineflayer": "4.39.0"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}

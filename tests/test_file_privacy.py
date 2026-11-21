@@ -70,7 +70,7 @@ class SensitiveFileTests(unittest.TestCase):
             self.assertEqual(len(confirmation_args), 1)
             details = confirmation_args[0]["_quanta_security_confirmation"]
             self.assertIn("API-ключи", details["warning"])
-            self.assertTrue(details["destinations"][0].endswith("\\.env.production"))
+            self.assertEqual(Path(details["destinations"][0]).name, ".env.production")
             self.assertTrue(any(event.get("type") == "tool_call" and event.get("name") == "read_file"
                                 and event.get("confirm") for event in events))
 

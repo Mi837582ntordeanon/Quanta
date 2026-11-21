@@ -341,7 +341,12 @@ class VisionFeatureTests(unittest.TestCase):
     def test_vision_model_setting_is_validated(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(storage, "DATA_DIR", Path(temp_dir)):
             store = storage.Store()
-            self.assertEqual(store.save_settings({"vision_model": "qwen3-vl:4b"})["vision_model"], "qwen3-vl:4b")
+            self.assertEqual(
+                store.save_settings({"vision_model": "qwen3-vl:4b", "work_dir": temp_dir})[
+                    "vision_model"
+                ],
+                "qwen3-vl:4b",
+            )
             with self.assertRaisesRegex(ValueError, "vision-модель"):
                 store.save_settings({"vision_model": "external:vision"})
 

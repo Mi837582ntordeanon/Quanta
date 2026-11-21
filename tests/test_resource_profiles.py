@@ -37,7 +37,12 @@ class ResourceProfileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.object(storage, "DATA_DIR", Path(temp_dir)):
                 store = storage.Store()
-                self.assertEqual(store.save_settings({"resource_profile": "game"})["resource_profile"], "game")
+                self.assertEqual(
+                    store.save_settings({"resource_profile": "game", "work_dir": temp_dir})[
+                        "resource_profile"
+                    ],
+                    "game",
+                )
                 with self.assertRaises(ValueError):
                     store.save_settings({"resource_profile": "turbo"})
 

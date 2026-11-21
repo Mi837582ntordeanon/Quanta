@@ -18,7 +18,12 @@ class ActionAcceptanceScenarios(unittest.TestCase):
             chats_dir = data_dir / "chats"
             with patch.object(storage, "DATA_DIR", data_dir), patch.object(storage, "CHATS_DIR", chats_dir):
                 store = storage.Store()
-                store.save_settings({"access_mode": "smart", "memory_enabled": False, "max_steps": 8})
+                store.save_settings({
+                    "access_mode": "smart",
+                    "memory_enabled": False,
+                    "max_steps": 8,
+                    "work_dir": root,
+                })
                 chat = store.create_chat("Проверка действия")
                 toolbox = Toolbox(store)
                 responses = iter(outcomes)

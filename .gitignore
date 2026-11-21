@@ -8,6 +8,8 @@ __pycache__/
 .venv/
 venv/
 env/
+.venv_node/
+/node_modules/
 
 # Local configuration and logs
 .env
@@ -30,8 +32,3 @@ env/
 *.wav
 *.mp3
 *.ogg
-
-# One-off local inspection scripts
-/_voice_blob_check.py
-/_voice_fs_check.py
-/Текстовый документ.txt

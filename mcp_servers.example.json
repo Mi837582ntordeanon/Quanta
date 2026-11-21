@@ -1,0 +1,12 @@
+{
+  "servers": [
+    {
+      "name": "quanta-echo-example",
+      "enabled": false,
+      "command": "py",
+      "args": ["-3.11", "tools/mcp_example_server.py"],
+      "cwd": ".",
+      "env": {}
+    }
+  ]
+}
