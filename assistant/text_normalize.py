@@ -135,9 +135,6 @@ def _replace_measure(match: re.Match[str]) -> str:
     try:
         numeric_value = float(number.replace(",", "."))
         if "." in number or "," in number:
-            global _NUM2WORDS
-            if _NUM2WORDS is None:
-                _NUM2WORDS = num2words
             number_words = str(_NUM2WORDS(number.replace(",", "."), lang="ru"))
             form_value = int(numeric_value)
         else:

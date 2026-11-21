@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wintypes
+from concurrent.futures import ThreadPoolExecutor
+import hmac
 import json
 import mimetypes
 import os
-import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -33,21 +35,30 @@ if str(ROOT) not in sys.path:
 from assistant.agent import Agent  # noqa: E402
 from assistant import llm  # noqa: E402
 from assistant import voice  # noqa: E402
+from assistant import command_sandbox  # noqa: E402
 from assistant.browser import open_app_window  # noqa: E402
 from assistant.hotkey import GlobalHotkey  # noqa: E402
+from assistant.minecraft_server import MinecraftServerManager  # noqa: E402
+from assistant.minecraft_companion import MinecraftCompanionManager  # noqa: E402
 from assistant.storage import (  # noqa: E402
-    DATA_DIR, MEDIA_DIR, UI_DIR, Store, new_id,
+    DATA_DIR, MEDIA_DIR, UI_DIR, Store,
 )
 from assistant.tools import Toolbox  # noqa: E402
+from assistant.vision import VisionService  # noqa: E402
 
 PORT = int(os.environ.get("QUANTA_PORT", "8765"))
 VERSION = "0.1.0"
 CREATE_NO_WINDOW = 0x08000000
+SESSION_TOKEN = secrets.token_urlsafe(32)
 
 STORE = Store()
-TOOLBOX = Toolbox(STORE)
+MINECRAFT = MinecraftServerManager()
+MINECRAFT_COMPANION = MinecraftCompanionManager(MINECRAFT, ROOT)
+VISION = VisionService(lambda: STORE.settings)
+TOOLBOX = Toolbox(STORE, minecraft=MINECRAFT, vision=VISION)
 ACTIVE: dict[str, threading.Event] = {}
 ACTIVE_LOCK = threading.Lock()
+TASK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quanta-task")
 PENDING: dict[str, dict[str, Any]] = {}
 PENDING_LOCK = threading.Lock()
 STOP = threading.Event()
@@ -71,7 +82,11 @@ mimetypes.add_type("model/stl", ".stl")
 
 
 def log(message: str) -> None:
-    line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {message}\n"
+    try:
+        safe_message = STORE.redact_secrets(str(message))
+    except Exception:
+        safe_message = "Сообщение скрыто: не удалось отфильтровать секреты"
+    line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {safe_message}\n"
     try:
         with LOG_LOCK:
             if LOG_PATH.exists() and LOG_PATH.stat().st_size > 2_000_000:
@@ -85,6 +100,16 @@ def log(message: str) -> None:
 def touch() -> None:
     global LAST_ACTIVITY
     LAST_ACTIVITY = time.time()
+
+
+def _show_path_in_explorer(raw_path: str) -> dict[str, Any]:
+    """Navigate to a path without handing files to their registered handler."""
+    target = Path(str(raw_path or "")).expanduser().resolve()
+    if not target.exists():
+        return {"ok": False, "text": "Путь не найден."}
+    command = ["explorer.exe", str(target)] if target.is_dir() else ["explorer.exe", "/select,", str(target)]
+    subprocess.Popen(command, close_fds=True)
+    return {"ok": True, "text": "Путь показан в Проводнике."}
 
 
 # --------------------------------------------------------------------- health
@@ -368,17 +393,22 @@ def confirm_callback(
     args: dict[str, Any],
     emit,
     stop_event: threading.Event,
-) -> bool:
+) -> bool | dict[str, Any]:
     event = threading.Event()
     with PENDING_LOCK:
-        PENDING[call_id] = {"event": event, "allow": False, "chat_id": chat_id}
+        PENDING[call_id] = {"event": event, "allow": False, "chat_id": chat_id,
+                            "kind": "plan" if name == "task_plan" else "tool", "approval": None}
     try:
+        label = "План задачи" if name == "task_plan" else TOOLBOX.label(name)
+        if name.startswith("mcp__"):
+            label = "MCP-инструмент · " + name
         emit({
             "type": "confirm",
             "id": call_id,
             "name": name,
-            "label": TOOLBOX.label(name),
+            "label": label,
             "args": args,
+            "kind": "plan" if name == "task_plan" else "tool",
         })
         deadline = time.time() + 300
         while time.time() < deadline:
@@ -388,7 +418,11 @@ def confirm_callback(
                 return False
         with PENDING_LOCK:
             info = PENDING.pop(call_id, None)
-        return bool(info and info.get("allow"))
+        if not info or not info.get("allow"):
+            return False
+        if info.get("kind") == "plan" or isinstance(info.get("approval"), dict):
+            return info.get("approval") or {}
+        return True
     finally:
         with PENDING_LOCK:
             PENDING.pop(call_id, None)
@@ -426,7 +460,7 @@ def idle_loop(server: ThreadingHTTPServer) -> None:
             return
         with ACTIVE_LOCK:
             active = bool(ACTIVE)
-        if not active and time.time() - LAST_ACTIVITY > 1800:
+        if not active and not MINECRAFT.has_running() and time.time() - LAST_ACTIVITY > 1800:
             log("idle shutdown")
             try:
                 server.shutdown()
@@ -454,6 +488,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", cache)
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; "
+                "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+            )
             self.end_headers()
             self.wfile.write(data)
         except OSError:
@@ -485,8 +527,19 @@ class Handler(BaseHTTPRequestHandler):
         return data
 
     def _check_host(self) -> bool:
-        host = (self.headers.get("Host") or "").split(":")[0].strip().lower()
-        if host in ("127.0.0.1", "localhost", "::1", "[::1]"):
+        raw_host = (self.headers.get("Host") or "").strip()
+        try:
+            parsed = urllib.parse.urlsplit("//" + raw_host)
+            expected_port = int(getattr(self.server, "server_port", PORT))
+            valid = (
+                parsed.hostname in ("127.0.0.1", "localhost", "::1")
+                and parsed.port == expected_port
+                and parsed.username is None and parsed.password is None
+                and not parsed.path
+            )
+        except ValueError:
+            valid = False
+        if valid:
             return True
         self._error(403, "Доступ разрешён только с этого компьютера")
         return False
@@ -497,13 +550,36 @@ class Handler(BaseHTTPRequestHandler):
             return True
         try:
             parsed = urllib.parse.urlsplit(origin)
+            host_header = urllib.parse.urlsplit("//" + (self.headers.get("Host") or "").strip())
+            expected_port = int(getattr(self.server, "server_port", PORT))
+            valid = (
+                parsed.scheme == "http"
+                and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+                and parsed.port == expected_port
+                and parsed.hostname == host_header.hostname
+                and parsed.port == host_header.port
+                and parsed.username is None and parsed.password is None
+                and parsed.path == "" and not parsed.query and not parsed.fragment
+            )
         except ValueError:
             self._error(403, "Некорректный Origin")
             return False
-        if parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1"):
+        if valid:
             return True
         self._error(403, "Запросы разрешены только из локального интерфейса")
         return False
+
+    def _authorize_api(self, path: str) -> bool:
+        """Require the UI's per-process capability token for every API route."""
+        if not path.startswith("/api/"):
+            return True
+        if not self._check_origin():
+            return False
+        supplied = self.headers.get("X-Quanta-Session", "")
+        if not hmac.compare_digest(str(supplied), SESSION_TOKEN):
+            self._error(403, "Сессия интерфейса истекла. Обнови страницу Кванты.")
+            return False
+        return True
 
     def _serve_file(self, path: Path, download_name: str | None = None) -> None:
         try:
@@ -514,6 +590,15 @@ class Handler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         self._send_bytes(data, content_type, cache="no-cache")
 
+    def _serve_index(self) -> None:
+        try:
+            html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+        except OSError:
+            self._error(404, "Интерфейс не найден")
+            return
+        html = html.replace("__QUANTA_SESSION_TOKEN__", SESSION_TOKEN)
+        self._send_bytes(html.encode("utf-8"), "text/html; charset=utf-8", cache="no-store")
+
     # ----------------------------------------------------------------------- GET
     def do_GET(self) -> None:
         self._touch()
@@ -522,9 +607,11 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(parsed.path)
         query = urllib.parse.parse_qs(parsed.query)
+        if not self._authorize_api(path):
+            return
         try:
             if path in ("/", "/index.html"):
-                self._serve_file(UI_DIR / "index.html")
+                self._serve_index()
                 return
             if path.startswith("/ui/"):
                 rel = path[len("/ui/"):]
@@ -543,7 +630,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_file(target)
                 return
             if path == "/api/bootstrap":
-                settings = STORE.settings
+                settings = STORE.public_settings()
                 self._json({
                     "ok": True,
                     "version": VERSION,
@@ -553,6 +640,7 @@ class Handler(BaseHTTPRequestHandler):
                     "reminders": STORE.list_reminders(),
                     "health": health_info(),
                     "system": system_stats(),
+                    "command_sandbox": command_sandbox.status(),
                     "server_time": datetime.now().isoformat(),
                     "data_dir": str(DATA_DIR),
                 })
@@ -579,9 +667,46 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/voice/status":
                 self._json({"ok": True, "voice": voice.voice_status(STORE)})
                 return
+            if path == "/api/vision/status":
+                self._json({"ok": True, **VISION.status()})
+                return
+            if path == "/api/desktop/apps":
+                from assistant import desktop
+                items = desktop.list_applications((query.get("query") or [""])[0], 120)
+                self._json({"ok": True, "applications": items})
+                return
+            if path == "/api/desktop/windows":
+                from assistant import desktop
+                items = desktop.list_windows((query.get("query") or [""])[0], 100)
+                self._json({"ok": True, "windows": items})
+                return
+            if path == "/api/desktop/tree":
+                from assistant import automation
+                hwnd = int((query.get("hwnd") or ["0"])[0] or 0)
+                result = automation.control_tree(hwnd, max_depth=5, limit=180)
+                self._json({"ok": True, **result})
+                return
+            if path == "/api/minecraft/versions":
+                self._json({"ok": True, **MINECRAFT.versions(limit=80)})
+                return
+            if path == "/api/minecraft/servers":
+                java = MINECRAFT.java_info()
+                java.pop("path", None)
+                self._json({"ok": True, "servers": MINECRAFT.list_servers(), "java": java})
+                return
+            if path == "/api/minecraft/companion":
+                self._json({"ok": True, "bots": MINECRAFT_COMPANION.list_status()})
+                return
+            if path.startswith("/api/minecraft/servers/") and path.endswith("/logs"):
+                server_id = path.split("/")[4]
+                self._json({"ok": True, "logs": MINECRAFT.logs(server_id, limit=160)})
+                return
             if path == "/api/memory":
                 query_text = (query.get("query") or [""])[0]
                 self._json({"ok": True, "memory": STORE.list_memory(query_text)})
+                return
+            if path == "/api/memory/semantic":
+                self._json({"ok": True, **STORE.semantic_memory.status()})
                 return
             if path == "/api/workflows":
                 self._json({"ok": True, "workflows": STORE.list_workflows()})
@@ -592,6 +717,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "projects": STORE.list_projects(
                     include_archived=include_archived, query=project_query,
                 )})
+                return
+            if path == "/api/tasks":
+                task_status = (query.get("status") or [""])[0]
+                task_chat_id = (query.get("chat_id") or [""])[0]
+                self._json({"ok": True, "tasks": STORE.list_tasks(chat_id=task_chat_id, status=task_status)})
+                return
+            if path.startswith("/api/tasks/"):
+                self._json({"ok": True, "task": STORE.get_task(path.split("/")[3])})
                 return
             if path == "/api/actions":
                 self._json({"ok": True, "actions": STORE.list_actions()})
@@ -626,6 +759,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": ok})
                 return
             self._error(404, "Не найдено")
+        except FileNotFoundError as exc:
+            self._error(404, str(exc))
+        except ValueError as exc:
+            self._error(400, str(exc))
+        except RuntimeError as exc:
+            self._error(503, str(exc))
         except Exception:
             log("GET error: " + traceback.format_exc())
             self._error(500, "Внутренняя ошибка сервера")
@@ -635,23 +774,23 @@ class Handler(BaseHTTPRequestHandler):
         self._touch()
         if not self._check_host():
             return
-        if not self._check_origin():
-            return
         parsed = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(parsed.path)
+        if not self._authorize_api(path):
+            return
         try:
             if path == "/api/chat":
                 self._handle_chat()
                 return
             if path == "/api/resource-profile":
                 data = self._read_json()
-                settings, status, error = request_resource_profile(str(data.get("profile") or ""))
+                _settings, status, error = request_resource_profile(str(data.get("profile") or ""))
                 if error:
                     self._error(status or 400, error)
                     return
                 with RESOURCE_LOCK:
                     transition = dict(RESOURCE_STATE)
-                self._json({"ok": True, "settings": settings, "transition": transition})
+                self._json({"ok": True, "settings": STORE.public_settings(), "transition": transition})
                 return
             if path == "/api/voice/tts":
                 data = self._read_json()
@@ -694,6 +833,95 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._json({"ok": True, **info})
                 return
+            if path == "/api/vision/pull":
+                data = self._read_json()
+                model = str(data.get("model") or "qwen3-vl:2b")
+                STORE.save_settings({"vision_model": model})
+                self._json(VISION.pull(model))
+                return
+            if path == "/api/desktop/apps/open":
+                from assistant import desktop
+                data = self._read_json()
+                self._json(desktop.launch_application(str(data.get("name") or "")))
+                return
+            if path in ("/api/desktop/windows/focus", "/api/desktop/windows/close"):
+                from assistant import desktop
+                data = self._read_json()
+                action = desktop.focus_application if path.endswith("/focus") else desktop.close_application
+                self._json(action(str(data.get("name") or "")))
+                return
+            if path == "/api/desktop/music":
+                from assistant import desktop
+                data = self._read_json()
+                self._json(desktop.music_control(str(data.get("action") or ""), str(data.get("query") or "")))
+                return
+            if path == "/api/desktop/tree/action":
+                from assistant import automation
+                data = self._read_json()
+                result = automation.perform_action(
+                    int(data.get("hwnd") or 0), data.get("path") or [], str(data.get("action") or ""),
+                    expected_name=str(data.get("expected_name") or ""),
+                    expected_type=str(data.get("expected_type") or ""),
+                    expected_automation_id=str(data.get("expected_automation_id") or ""),
+                    value=str(data.get("value") or ""),
+                )
+                self._json(result)
+                return
+            if path == "/api/desktop/vision":
+                data = self._read_json()
+                result = TOOLBOX._pc_vision(str(data.get("prompt") or "Опиши, что видно на экране. Отвечай по-русски, коротко и по делу."))
+                self._json(result, 200 if result.get("ok") else 503)
+                return
+            if path == "/api/minecraft/servers":
+                data = self._read_json()
+                item = MINECRAFT.create_server(
+                    name=str(data.get("name") or ""), version=str(data.get("version") or ""),
+                    eula_accepted=data.get("eula_accepted") is True,
+                    port=data.get("port", 25565), memory_mb=data.get("memory_mb", 2048),
+                    max_players=data.get("max_players", 10), lan_access=data.get("lan_access") is True,
+                )
+                self._json({"ok": True, "server": item}, 202)
+                return
+            if path.startswith("/api/minecraft/companion/"):
+                parts = path.split("/")
+                if len(parts) < 6:
+                    self._error(404, "Неизвестное действие Minecraft-компаньона")
+                    return
+                server_id, action = parts[4], parts[5]
+                if action == "start":
+                    data = self._read_json()
+                    self._json({"ok": True, "bot": MINECRAFT_COMPANION.start(
+                        server_id, str(data.get("username") or "Quanta"))}, 202)
+                    return
+                if action == "stop":
+                    self._json({"ok": True, "bot": MINECRAFT_COMPANION.stop(server_id)})
+                    return
+                if action == "chat":
+                    data = self._read_json()
+                    self._json({"ok": True, "bot": MINECRAFT_COMPANION.say(
+                        server_id, str(data.get("text") or ""))})
+                    return
+                self._error(404, "Неизвестное действие Minecraft-компаньона")
+                return
+            if path.startswith("/api/minecraft/servers/"):
+                parts = path.split("/")
+                if len(parts) < 6:
+                    self._error(404, "Неизвестное действие Minecraft-сервера")
+                    return
+                server_id, action = parts[4], parts[5]
+                if action == "start":
+                    self._json({"ok": True, "server": MINECRAFT.start(server_id)})
+                    return
+                if action == "stop":
+                    MINECRAFT_COMPANION.stop_for_server(server_id)
+                    self._json({"ok": True, "server": MINECRAFT.stop(server_id)})
+                    return
+                if action == "command":
+                    data = self._read_json()
+                    self._json(MINECRAFT.send_command(server_id, str(data.get("command") or "")))
+                    return
+                self._error(404, "Неизвестное действие Minecraft-сервера")
+                return
             if path == "/api/confirm":
                 data = self._read_json()
                 confirm_id = str(data.get("id") or "")
@@ -702,6 +930,9 @@ class Handler(BaseHTTPRequestHandler):
                     info = PENDING.get(confirm_id)
                 if info:
                     info["allow"] = allow
+                    if allow and isinstance(data.get("approval"), dict):
+                        approval = data.get("approval")
+                        info["approval"] = approval
                     info["event"].set()
                 self._json({"ok": True})
                 return
@@ -738,12 +969,16 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     self._error(400, str(exc))
                     return
-                self._json({"ok": True, "settings": settings})
+                self._json({"ok": True, "settings": STORE.public_settings()})
                 return
             if path == "/api/memory":
                 data = self._read_json()
                 item = STORE.create_memory(str(data.get("text") or ""))
                 self._json({"ok": True, "item": item})
+                return
+            if path == "/api/memory/semantic":
+                STORE.semantic_memory.start(STORE.list_memory())
+                self._json({"ok": True, **STORE.semantic_memory.status()})
                 return
             if path == "/api/workflows":
                 data = self._read_json()
@@ -839,8 +1074,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/open":
                 data = self._read_json()
-                target = str(data.get("path") or "")
-                result = TOOLBOX._open_path(target)
+                # UI navigation only: never run a file from this endpoint.
+                result = _show_path_in_explorer(str(data.get("path") or ""))
                 self._json(result)
                 return
             if path == "/api/reveal":
@@ -858,6 +1093,10 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, "Не найдено")
         except ValueError as exc:
             self._error(400, str(exc))
+        except FileNotFoundError as exc:
+            self._error(404, str(exc))
+        except (RuntimeError, OSError) as exc:
+            self._error(503, str(exc))
         except Exception:
             log("POST error: " + traceback.format_exc())
             self._error(500, "Внутренняя ошибка сервера")
@@ -875,11 +1114,24 @@ class Handler(BaseHTTPRequestHandler):
             self._error(400, "Сообщение слишком длинное")
             return
         chat_id = str(data.get("chat_id") or "").strip()
+        task_id = str(data.get("task_id") or "").strip() or None
         if chat_id:
             try:
                 chat = STORE.get_chat(chat_id)
             except (FileNotFoundError, ValueError) as exc:
                 self._error(404, str(exc))
+                return
+        if task_id:
+            try:
+                task = STORE.get_task(task_id)
+            except (FileNotFoundError, ValueError) as exc:
+                self._error(404, str(exc))
+                return
+            if task.get("chat_id") != chat_id:
+                self._error(400, "Задача привязана к другому чату")
+                return
+            if task.get("status") not in {"interrupted", "paused", "failed"}:
+                self._error(409, "Эта задача сейчас не ожидает возобновления")
                 return
         with RESOURCE_LOCK:
             if RESOURCE_STATE.get("status") == "switching":
@@ -894,6 +1146,18 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 stop_event = threading.Event()
                 ACTIVE[chat_id] = stop_event
+
+        try:
+            if task_id:
+                STORE.update_task(task_id, status="queued", checkpoint="Задача повторно поставлена в очередь.",
+                                  checkpoint_type="queued", error="")
+            else:
+                task_id = STORE.create_task(chat_id, text, status="queued")["id"]
+        except (FileNotFoundError, ValueError) as exc:
+            with ACTIVE_LOCK:
+                ACTIVE.pop(chat_id, None)
+            self._error(400, str(exc))
+            return
 
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
@@ -915,11 +1179,19 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, OSError):
                 stop_event.set()
 
-        emit({"type": "start", "chat_id": chat_id, "title": chat.get("title") or "Новый чат"})
+        emit({"type": "start", "chat_id": chat_id, "title": chat.get("title") or "Новый чат", "task_id": task_id})
         agent = Agent(STORE, TOOLBOX, confirm_callback)
         try:
-            agent.run(chat_id, text, emit, stop_event, tone_mode=tone_mode)
+            # Serialize model work so two chats cannot load models at once and
+            # exhaust system memory. Pending runs are durable task records.
+            future = TASK_EXECUTOR.submit(agent.run, chat_id, text, emit, stop_event, tone_mode, task_id)
+            future.result()
         except Exception:
+            try:
+                STORE.update_task(task_id, status="failed", checkpoint="Задача аварийно завершилась.",
+                                  checkpoint_type="error", error="См. data/quanta.log")
+            except Exception:
+                pass
             log("agent error: " + traceback.format_exc())
             emit({"type": "error", "message": "Внутренняя ошибка агента. Подробности в data/quanta.log."})
         finally:
@@ -937,6 +1209,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._check_host():
             return
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        if not self._authorize_api(path):
+            return
         try:
             if path.startswith("/api/chats/"):
                 chat_id = path.split("/")[3]
@@ -977,6 +1251,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._check_host():
             return
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
+        if not self._authorize_api(path):
+            return
         try:
             if path.startswith("/api/notes/"):
                 note_id = path.split("/")[3]
@@ -1056,7 +1332,10 @@ def main() -> None:
     threading.Thread(target=reminder_loop, daemon=True).start()
     threading.Thread(target=idle_loop, args=(server,), daemon=True).start()
 
-    threading.Thread(target=_initialize_models, daemon=True, name="quanta-model-warmup").start()
+    if os.environ.get("QUANTA_SKIP_MODEL_WARMUP") == "1":
+        log("model warmup skipped by QUANTA_SKIP_MODEL_WARMUP")
+    else:
+        threading.Thread(target=_initialize_models, daemon=True, name="quanta-model-warmup").start()
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
@@ -1067,6 +1346,14 @@ def main() -> None:
         STOP.set()
         if HOTKEY:
             HOTKEY.stop()
+        try:
+            MINECRAFT_COMPANION.shutdown()
+        except Exception:
+            log("Minecraft companion cleanup error: " + traceback.format_exc())
+        try:
+            MINECRAFT.shutdown()
+        except Exception:
+            log("Minecraft cleanup error: " + traceback.format_exc())
         try:
             with RESOURCE_OPERATION_LOCK:
                 release_result = voice.release_loaded_models()

@@ -184,11 +184,125 @@ def stream_chat(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
 ) -> Generator[dict[str, Any], None, None]:
-    provider = settings.get("provider", "ollama")
-    if provider == "ollama":
+    primary = iter(_stream_provider(settings, messages, tools))
+    try:
+        first = next(primary)
+    except StopIteration:
+        return
+    except Exception as exc:
+        fallbacks = _fallback_settings(settings)
+        if not fallbacks or not _retryable_before_output(exc):
+            raise
+        last_error: Exception = exc
+        for fallback in fallbacks:
+            candidate = iter(_stream_provider(fallback, messages, tools))
+            try:
+                first_fallback_event = next(candidate)
+            except StopIteration:
+                continue
+            except Exception as fallback_error:
+                last_error = fallback_error
+                if _retryable_before_output(fallback_error):
+                    continue
+                raise
+            yield {
+                "type": "provider_fallback",
+                "provider": fallback["provider"],
+                "model": fallback["model"],
+                "reason": str(last_error)[:240],
+            }
+            yield first_fallback_event
+            yield from candidate
+            return
+        raise last_error
+    yield first
+    # Once a token or tool-call stream has started, retrying another model
+    # could duplicate or diverge from text already shown to the user.
+    yield from primary
+
+
+def _stream_provider(
+    settings: dict[str, Any], messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None,
+) -> Generator[dict[str, Any], None, None]:
+    if settings.get("provider", "ollama") == "ollama":
         yield from _stream_ollama(settings, messages, tools)
     else:
         yield from _stream_openai(settings, messages, tools)
+
+
+def _fallback_settings(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    if not settings.get("fallback_enabled"):
+        return []
+    routes: list[dict[str, Any]] = []
+    legacy_model = str(settings.get("fallback_model") or "").strip()
+    raw_routes = []
+    if legacy_model:
+        raw_routes.append({
+            "provider": settings.get("fallback_provider") or "openai",
+            "model": legacy_model,
+            "api_url": settings.get("fallback_api_url") or settings.get("api_url"),
+            "api_key": settings.get("fallback_api_key") or settings.get("api_key"),
+        })
+    configured = settings.get("fallback_routes") or []
+    if isinstance(configured, list):
+        raw_routes.extend(item for item in configured if isinstance(item, dict))
+    primary_key = (str(settings.get("provider") or "ollama"),
+                   str(settings.get("model") or ""),
+                   str(settings.get("api_url") or settings.get("ollama_url") or ""))
+    for raw in raw_routes[:5]:
+        provider = str(raw.get("provider") or "openai")
+        model = str(raw.get("model") or "").strip()
+        if provider not in {"ollama", "openai"} or not model:
+            continue
+        url_key = str(raw.get("api_url") or raw.get("ollama_url") or
+                      (settings.get("api_url") if provider == "openai" else settings.get("ollama_url")) or "")
+        if (provider, model, url_key) == primary_key:
+            continue
+        route = dict(settings)
+        route.update({"provider": provider, "model": model, "fallback_enabled": False,
+                      "fallback_routes": []})
+        if provider == "openai":
+            route["api_url"] = raw.get("api_url") or settings.get("api_url")
+            route["api_key"] = raw.get("api_key") or settings.get("fallback_api_key") or settings.get("api_key")
+        else:
+            route["ollama_url"] = raw.get("ollama_url") or settings.get("ollama_url")
+        routes.append(route)
+    return routes
+
+
+def planner_route_settings(settings: dict[str, Any]) -> dict[str, Any] | None:
+    """Use the first configured reserve for optional multi-step plan refinement."""
+    if not settings.get("planner_enabled"):
+        return None
+    routes = _fallback_settings(settings)
+    if not routes:
+        return None
+    primary = dict(routes[0])
+    primary["fallback_enabled"] = len(routes) > 1
+    primary["fallback_model"] = ""
+    primary["fallback_routes"] = [
+        {
+            "provider": route["provider"], "model": route["model"],
+            "api_url": route.get("api_url", ""), "ollama_url": route.get("ollama_url", ""),
+            "api_key": route.get("api_key", ""),
+        }
+        for route in routes[1:]
+    ]
+    return primary
+
+
+def _retryable_before_output(exc: Exception) -> bool:
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return True
+    message = str(exc).casefold()
+    if any(text in message for text in (
+        "не удалось подключиться", "не ответила вовремя", "connection refused",
+        "connection reset", "timed out", "temporary failure",
+    )):
+        return True
+    if isinstance(exc, LLMError):
+        return any(f"({code})" in message for code in (429, 500, 502, 503, 504))
+    return False
 
 
 def effective_runtime_settings(settings: dict[str, Any]) -> dict[str, Any]:

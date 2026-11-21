@@ -6,6 +6,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 const TOOL_LABELS = {
+  tool_search: 'Подбор инструментов',
   list_dir: 'Просмотр папки',
   read_file: 'Чтение файла',
   write_file: 'Запись файла',
@@ -37,11 +38,18 @@ const TOOL_LABELS = {
   list_processes: 'Процессы',
   kill_process: 'Завершение процесса',
   minecraft_status: 'Статус Minecraft',
+  pc_apps: 'Список приложений', pc_app_open: 'Запуск приложения', pc_windows: 'Список окон',
+  pc_window_focus: 'Переключение окна', pc_window_close: 'Закрытие окна',
+  pc_uia_tree: 'Чтение дерева интерфейса', pc_uia_action: 'Действие через UI Automation',
+  pc_vision: 'Анализ экрана', yandex_music: 'Яндекс Музыка',
+  minecraft_servers: 'Список Minecraft-серверов', minecraft_server_start: 'Запуск Minecraft-сервера',
+  minecraft_server_stop: 'Остановка Minecraft-сервера', minecraft_server_command: 'Команда Minecraft-серверу',
   weather: 'Погода',
 };
 
 const MODE_LABELS = { safe: 'Безопасный', smart: 'Умный', auto: 'Авто' };
 const params = new URLSearchParams(location.search);
+const sessionToken = document.querySelector('meta[name="quanta-session-token"]')?.content || '';
 
 const state = {
   settings: null,
@@ -49,7 +57,10 @@ const state = {
   notes: [],
   reminders: [],
   memories: [],
+  memorySemantic: null,
+  memorySemanticTimer: null,
   projects: [],
+  tasks: [],
   workflows: [],
   actions: [],
   models: [],
@@ -64,6 +75,7 @@ const state = {
   drawerMode: '',
   editingProjectId: '',
   dataDir: '',
+  commandSandbox: null,
   version: '0.1.0',
   system: null,
   bootTimer: null,
@@ -75,6 +87,18 @@ const state = {
   voiceStatus: null,
   lastVoiceMetrics: null,
   voiceCaptureEffects: null,
+  desktopTab: 'apps',
+  desktopQuery: '',
+  desktopTree: null,
+  desktopTreeHwnd: 0,
+  visionStatus: null,
+  visionPollTimer: null,
+  minecraftServers: [],
+  minecraftCompanion: [],
+  minecraftVersions: [],
+  minecraftLatest: '',
+  minecraftJava: null,
+  minecraftPollTimer: null,
 };
 
 const dom = {};
@@ -161,15 +185,16 @@ function toast(title, text = '', type = 'info', ms = 4500) {
   el.innerHTML = `<b>${escapeHtml(title)}</b>${text ? escapeHtml(text) : ''}`;
   dom.toasts.appendChild(el);
   setTimeout(() => {
-    el.style.opacity = '0';
-    el.style.transform = 'translateY(6px)';
-    el.style.transition = '.25s';
+    el.classList.add('is-leaving');
     setTimeout(() => el.remove(), 300);
   }, ms);
 }
 
 async function api(path, options = {}) {
-  const opts = { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } };
+  const opts = { ...options, headers: {
+    'Content-Type': 'application/json', 'X-Quanta-Session': sessionToken,
+    ...(options.headers || {}),
+  } };
   const response = await fetch(path, opts);
   let data = {};
   try {
@@ -186,35 +211,70 @@ async function api(path, options = {}) {
 function showToolConfirm(ev) {
   return new Promise((resolve) => {
     let decided = false;
+    const isPlan = ev.kind === 'plan';
     const label = ev.label || TOOL_LABELS[ev.name] || ev.name || 'действие';
     const extra = confirmWarning(ev.name);
+    const securityConfirmation = ev.args?._quanta_security_confirmation || null;
+    const displayArgs = { ...(ev.args || {}) };
+    delete displayArgs._quanta_security_confirmation;
+    const securityBody = securityConfirmation ? `
+      <div class="confirm-warning">
+        ${escapeHtml(securityConfirmation.warning || 'В этом ходе уже прочитаны данные; проверьте внешний запрос.')}
+        ${(securityConfirmation.destinations || []).map((target) => `<div>${escapeHtml(target)}</div>`).join('')}
+      </div>
+    ` : '';
+    const steps = Array.isArray(ev.args?.steps) ? ev.args.steps : [];
+    const sandboxAvailable = !!state.commandSandbox?.available;
+    const commandSandboxBody = !isPlan && ev.name === 'run_command' ? `
+      ${sandboxAvailable ? `
+        <label class="pc-check sandbox-choice"><input id="toolSandbox" type="checkbox"><span>Запустить в Windows Sandbox: сеть и буфер обмена отключены, доступна только рабочая папка</span></label>
+      ` : `<div class="confirm-warning">Windows Sandbox выключен. Без него команда запустится с правами твоей учётной записи.</div>`}
+      <div class="confirm-warning">Проверь команду целиком: запуск от твоего имени может читать и менять доступные тебе файлы.</div>
+    ` : '';
+    const planBody = isPlan ? `
+      <div class="project-field"><small>ШАГИ</small><ol>${steps.map((step) => `<li>${escapeHtml(step)}</li>`).join('')}</ol></div>
+      <label class="field u-mt-12"><span>Разрешённая папка (внутри рабочей папки)</span><input id="planRoot" value="${escapeAttr(ev.args?.boundary_root || '')}" autocomplete="off"></label>
+      <label class="pc-check u-mt-10"><input id="planAllowWrite" type="checkbox"><span>Разрешить изменения файлов только внутри этой папки</span></label>
+      <label class="field u-mt-10"><span>Точные команды, которые можно запускать без отдельного подтверждения</span><textarea id="planCommands" rows="3" placeholder="Одна полная команда на строку; оставь пустым, чтобы команды каждый раз спрашивали"></textarea></label>
+      ${sandboxAvailable ? `<label class="pc-check sandbox-choice u-mt-10"><input id="planSandboxCommands" type="checkbox"><span>Запускать эти команды в Windows Sandbox</span></label><div class="form-note">Sandbox отключает сеть и буфер обмена. В гостевую систему передаётся только выбранная папка; её изменения сохраняются на компьютере.</div>` : `<div class="confirm-warning">Windows Sandbox выключен, поэтому перечисленные команды не будут запускаться автоматически — Кванта спросит разрешение перед каждой.</div>`}
+      <div class="confirm-warning">Команды, не запущенные в Sandbox, работают с правами твоей учётной записи и могут обращаться к любым доступным ей путям. Добавляй только строки, которые готов разрешить целиком.</div>
+    ` : '';
     const modal = openModal(`
       <div class="modal-head">
-        <div style="display:flex;gap:12px;align-items:flex-start">
+        <div class="u-flex-start">
           <div class="confirm-icon">!</div>
-          <div><h3>Требуется подтверждение</h3><p>Кванта хочет выполнить: <span class="confirm-tool">${escapeHtml(label)}</span></p></div>
+          <div><h3>${isPlan ? 'Проверка плана' : 'Требуется подтверждение'}</h3><p>${isPlan ? 'Одобришь шаги и границы выполнения?' : `Кванта хочет выполнить: <span class="confirm-tool">${escapeHtml(label)}</span>`}</p></div>
         </div>
       </div>
       <div class="modal-body">
-        <div class="confirm-args">${escapeHtml(formatArgs(ev.args))}</div>
+        ${isPlan ? planBody : `<div class="confirm-args">${escapeHtml(formatArgs(displayArgs))}</div>${commandSandboxBody}`}
+        ${securityBody}
         ${extra ? `<div class="confirm-warning">${escapeHtml(extra)}</div>` : ''}
       </div>
       <div class="modal-foot">
-        <button type="button" class="btn danger" data-confirm="0">Отклонить</button>
-        <button type="button" class="btn primary" data-confirm="1">Разрешить</button>
+        <button type="button" class="btn danger" data-confirm="0">${isPlan ? 'Отклонить план' : 'Отклонить'}</button>
+        <button type="button" class="btn primary" data-confirm="1">${isPlan ? 'Одобрить план' : 'Разрешить'}</button>
       </div>
-    `, { dismissible: false, onClose: () => settle(false) });
+    `, { wide: isPlan, dismissible: false, onClose: () => settle(false) });
 
     const settle = async (allow) => {
       if (decided) return;
       decided = true;
       const card = state.toolCards.get(ev.id);
       if (card) setToolStatus(card, allow ? 'pending' : 'denied');
+      const approval = isPlan && allow ? {
+        root: modal.el.querySelector('#planRoot')?.value.trim() || '',
+        allow_write: !!modal.el.querySelector('#planAllowWrite')?.checked,
+        sandbox_commands: !!modal.el.querySelector('#planSandboxCommands')?.checked,
+        commands: (modal.el.querySelector('#planCommands')?.value || '').split(/\r?\n/).map((item) => item.trim()).filter(Boolean).slice(0, 20),
+      } : (!isPlan && allow && ev.name === 'run_command' ? {
+        allow: true, sandbox: !!modal.el.querySelector('#toolSandbox')?.checked,
+      } : undefined);
       modal.close();
       try {
         await api('/api/confirm', {
           method: 'POST',
-          body: JSON.stringify({ id: ev.id, allow }),
+          body: JSON.stringify({ id: ev.id, allow, ...(approval ? { approval } : {}) }),
         });
       } catch (err) {
         toast('Подтверждение не доставлено', err.message, 'error');
@@ -227,7 +287,7 @@ function showToolConfirm(ev) {
     });
     const card = state.toolCards.get(ev.id);
     if (card) setToolStatus(card, 'waiting');
-    state.activeTask = `Ожидаю разрешение: ${label}`;
+    state.activeTask = isPlan ? 'Ожидаю одобрение плана' : `Ожидаю разрешение: ${label}`;
     setOrbState('permission');
   });
 }
@@ -253,6 +313,24 @@ function confirmWarning(name) {
   }
   if (name === 'kill_process') {
     return 'Процесс будет завершён. Несохранённые данные в программе могут потеряться.';
+  }
+  if (name === 'pc_vision') {
+    return 'Снимок экрана может содержать личные данные. Он будет обработан локальной Ollama и сохранён в data/media/screenshots.';
+  }
+  if (name === 'pc_windows' || name === 'pc_uia_tree') {
+    return 'Кванта прочитает названия окон и доступный текст элементов выбранного интерфейса. Там могут быть личные данные.';
+  }
+  if (name === 'pc_uia_action' || name === 'pc_window_close') {
+    return 'Это действие изменит состояние открытого окна. Перед вводом проверь, что указано обычное текстовое поле; пароли блокируются.';
+  }
+  if (name === 'pc_app_open') {
+    return 'Кванта запустит выбранное приложение Windows.';
+  }
+  if (name === 'yandex_music') {
+    return 'Поиск запускает найденный точный трек в Яндекс Музыке. Медиаклавиши могут управлять сессией другого приложения.';
+  }
+  if (name.startsWith('minecraft_server_')) {
+    return 'Это действие управляет локальным сервером Minecraft. В режиме offline-mode имена игроков не проверяются.';
   }
   return '';
 }
@@ -651,6 +729,14 @@ async function handleStreamEvent(ev) {
       appendStreamingSpeechDelta(ev.text || '');
       scrollToBottom();
       break;
+    case 'provider_fallback':
+      toast('Модель переключилась', `Резерв: ${ev.model || 'модель'} · ${ev.provider || 'провайдер'}`, 'warn', 5000);
+      break;
+    case 'planner_status':
+      if (ev.status === 'started') state.activeTask = `Планирую с моделью ${ev.model || 'резерва'}`;
+      else if (ev.status === 'complete') state.activeTask = 'Проверяю план и границы';
+      else if (ev.status === 'failed') toast('Большая модель недоступна', 'Оставила черновой план основной модели.', 'warn', 5000);
+      break;
     case 'step_end': {
       const msg = ev.message || {};
       if (msg.content !== undefined || (msg.tool_calls || []).length) {
@@ -728,11 +814,11 @@ async function handleStreamEvent(ev) {
   }
 }
 
-async function sendMessage() {
+async function sendMessage(textOverride = '', resumeTaskId = '') {
   if (state.busy || !state.settings) return;
-  const text = dom.input.value.trim();
+  const text = String(textOverride || dom.input.value).trim();
   if (!text) return;
-  dom.input.value = '';
+  if (!textOverride) dom.input.value = '';
   autoGrowInput();
   closeSidebar();
   stopSpeech();
@@ -748,8 +834,8 @@ async function sendMessage() {
   try {
     const response = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: state.chatId, text, tone_mode: state.seriousMode ? 'serious' : 'default' }),
+      headers: { 'Content-Type': 'application/json', 'X-Quanta-Session': sessionToken },
+      body: JSON.stringify({ chat_id: state.chatId, text, tone_mode: state.seriousMode ? 'serious' : 'default', ...(resumeTaskId ? { task_id: resumeTaskId } : {}) }),
       signal: controller.signal,
     });
     if (!response.ok) {
@@ -1093,7 +1179,7 @@ function confirmDialog({ title, text, confirmLabel = 'Подтвердить', d
     let decided = false;
     const modal = openModal(`
       <div class="modal-head"><h3>${escapeHtml(title)}</h3></div>
-      <div class="modal-body"><div class="form-note" style="font-size:12px;color:var(--muted)">${escapeHtml(text)}</div></div>
+      <div class="modal-body"><div class="form-note u-note-small">${escapeHtml(text)}</div></div>
       <div class="modal-foot">
         <button type="button" class="btn" data-close>Отмена</button>
         <button type="button" class="btn ${danger ? 'danger' : 'primary'}" id="confirmYes">${escapeHtml(confirmLabel)}</button>
@@ -1135,11 +1221,129 @@ function openDrawer(kind) {
   else if (kind === 'reminders') renderRemindersDrawer();
   else if (kind === 'memory') refreshMemory();
   else if (kind === 'projects') refreshProjects();
+  else if (kind === 'tasks') refreshTasks();
   else if (kind === 'workflows') refreshWorkflows();
   else if (kind === 'actions') refreshActions();
   else if (kind === 'diagnostics') renderDiagnosticsDrawer();
   else if (kind === 'analytics') { renderAnalyticsDrawer(); pollSystem(); }
+  else if (kind === 'computer') renderComputerDrawer();
+  else if (kind === 'minecraft') renderMinecraftDrawer();
   closeSidebar();
+}
+
+function computerTabs(active) {
+  return `<div class="pc-tabs">${[['apps','Приложения'],['windows','Окна'],['screen','Экран'],['music','Музыка']]
+    .map(([key,label]) => `<button type="button" class="${active === key ? 'active' : ''}" data-action="computer-tab" data-tab="${key}">${label}</button>`).join('')}</div>`;
+}
+
+function uiNodeCard(node, hwnd) {
+  const actualName = String(node.name || '');
+  const name = actualName || (node.password ? 'Поле пароля скрыто' : 'Без подписи');
+  const type = String(node.type || 'Control');
+  const path = escapeAttr(JSON.stringify(node.path || []));
+  const common = `data-hwnd="${Number(hwnd) || 0}" data-path="${path}" data-name="${escapeAttr(actualName)}" data-type="${escapeAttr(type)}" data-id="${escapeAttr(node.automation_id || '')}"`;
+  const buttonType = /Button|CheckBox|RadioButton|ListItem|MenuItem|TabItem/.test(type);
+  let action = `<button type="button" class="btn small" data-action="pc-ui-action" data-kind="focus" ${common}>Фокус</button>`;
+  if (buttonType) action += ` <button type="button" class="btn small" data-action="pc-ui-action" data-kind="${/CheckBox|RadioButton/.test(type) ? 'toggle' : /ListItem|TabItem/.test(type) ? 'select' : 'invoke'}" ${common}>${/CheckBox|RadioButton/.test(type) ? 'Переключить' : /ListItem|TabItem/.test(type) ? 'Выбрать' : 'Нажать'}</button>`;
+  if (/Edit|Document/.test(type) && !node.password) action += `<form class="pc-inline-form" data-form="pc-ui-value" ${common}><input maxlength="1000" placeholder="Текст для поля"><button class="btn small" type="submit">Ввести</button></form>`;
+  const children = (node.children || []).map((child) => uiNodeCard(child, hwnd)).join('');
+  return `<details class="pc-tree-node"><summary><span>${escapeHtml(name)}</span><small>${escapeHtml(type)}${node.enabled ? '' : ' · выключен'}</small></summary><div class="pc-tree-content"><div class="pc-tree-actions">${action}</div>${children}</div></details>`;
+}
+
+async function renderComputerDrawer(tab = state.desktopTab || 'apps') {
+  state.desktopTab = tab;
+  dom.drawerTitle.textContent = 'Компьютер';
+  dom.drawerBody.innerHTML = `${computerTabs(tab)}<div class="empty-state">Загружаю…</div>`;
+  try {
+    if (tab === 'apps') {
+      const data = await api('/api/desktop/apps?query=' + encodeURIComponent(state.desktopQuery || ''));
+      dom.drawerBody.innerHTML = `${computerTabs(tab)}
+        <form id="pcSearchForm" class="pc-search"><input name="query" placeholder="Найти приложение…" value="${escapeAttr(state.desktopQuery || '')}"><button class="btn small" type="submit">Найти</button></form>
+        <div class="pc-list">${data.applications.map((app) => `<div class="pc-row"><div><b>${escapeHtml(app.name)}</b><small>${escapeHtml(app.id)}</small></div><button class="btn small primary" data-action="pc-launch" data-name="${escapeAttr(app.name)}">Открыть</button></div>`).join('') || '<div class="empty-state">Приложений не найдено</div>'}</div>
+        <div class="pc-card"><b>Запустить по пути</b><small>Для portable-программ и приложений, которых нет в меню «Пуск».</small><form id="pcPathForm" class="pc-search"><input name="path" placeholder="C:\\Папка\\Программа.exe или URL" required><button class="btn small" type="submit">Открыть</button></form></div>`;
+    } else if (tab === 'windows') {
+      const data = await api('/api/desktop/windows?query=' + encodeURIComponent(state.desktopQuery || ''));
+      dom.drawerBody.innerHTML = `${computerTabs(tab)}
+        <form id="pcWindowSearchForm" class="pc-search"><input name="query" placeholder="Фильтр окон…" value="${escapeAttr(state.desktopQuery || '')}"><button class="btn small" type="submit">Найти</button></form>
+        <div class="pc-list">${data.windows.map((win) => `<div class="pc-row"><div><b>${escapeHtml(win.title || 'Окно без заголовка')}</b><small>${escapeHtml(win.process || 'Приложение')} · HWND ${Number(win.hwnd) || 0}</small></div><div class="pc-row-actions"><button class="btn small" data-action="pc-focus" data-name="${escapeAttr(win.title || win.process)}">Фокус</button><button class="btn small" data-action="pc-read-tree" data-hwnd="${Number(win.hwnd) || 0}">Элементы</button><button class="btn small danger" data-action="pc-close-window" data-name="${escapeAttr(win.title || win.process)}">Закрыть</button></div></div>`).join('') || '<div class="empty-state">Открытые окна не найдены</div>'}</div>`;
+    } else if (tab === 'screen') {
+      const vision = await api('/api/vision/status');
+      state.visionStatus = vision;
+      let treeHtml = '';
+      if (state.desktopTree) treeHtml = `<div class="pc-tree-head"><b>${escapeHtml(state.desktopTree.window?.title || 'Окно')}</b><span>${state.desktopTree.node_count || 0} элементов${state.desktopTree.truncated ? ' · список обрезан' : ''}</span></div>${state.desktopTree.tree ? uiNodeCard(state.desktopTree.tree, state.desktopTreeHwnd) : ''}`;
+      dom.drawerBody.innerHTML = `${computerTabs(tab)}
+        <div class="pc-card"><div class="pc-card-head"><div><b>Модель зрения</b><small>Скриншот отправляется только локальной Ollama.</small></div><span class="pc-status ${vision.available ? 'ok' : 'bad'}">${vision.available ? (vision.installed ? 'ГОТОВА' : 'OLLAMA НАЙДЕНА') : 'НЕТ СВЯЗИ'}</span></div>
+          ${vision.error ? `<div class="form-note">${escapeHtml(vision.error)}</div>` : ''}
+          <div class="pc-model-row"><select id="visionModelSelect" class="select">${[['qwen3-vl:2b','1,9 ГБ · лучше начать с неё'],['qwen3-vl:4b','3,3 ГБ'],['qwen3-vl:8b','6,2 ГБ · тяжелее для видеопамяти']].map(([model,label]) => `<option value="${model}" ${vision.model === model ? 'selected' : ''}>${model} — ${label}</option>`).join('')}</select><button class="btn small" data-action="vision-pull" ${!vision.available || !vision.supported || vision.status === 'pulling' || vision.installed ? 'disabled' : ''}>${vision.status === 'pulling' ? 'Загружается…' : vision.installed ? 'Модель загружена' : 'Загрузить модель'}</button></div>
+          <small>Нужна Ollama 0.12.7 или новее${vision.ollama_version ? ` · сейчас ${escapeHtml(vision.ollama_version)}` : ''}.</small>
+          ${vision.total ? `<progress class="pc-progress" max="100" value="${Math.min(100, Math.round(vision.completed * 100 / vision.total))}" aria-label="Загрузка модели зрения"></progress><small>${(vision.completed / 1073741824).toFixed(2)} / ${(vision.total / 1073741824).toFixed(2)} ГБ · ${escapeHtml(vision.message || '')}</small>` : `<small>${escapeHtml(vision.message || (vision.installed ? 'Модель уже установлена.' : 'Загрузка модели может занять несколько гигабайт.'))}</small>`}
+        </div>
+        <div class="pc-card"><label class="field"><span>Что проверить на экране</span><input id="visionPrompt" value="Опиши, что видно на экране. Отвечай по-русски, коротко и по делу."></label><button class="btn primary" id="visionAnalyzeButton" data-action="vision-analyze" ${vision.installed && vision.supported ? '' : 'disabled'}>Сделать снимок и разобрать</button><div id="visionResult" class="pc-vision-result"></div></div>
+        <div class="pc-card"><div class="pc-card-head"><div><b>Дерево элементов Windows</b><small>Кнопки и поля читаются через встроенную UI Automation.</small></div><button class="btn small" data-action="pc-refresh-tree">Обновить дерево</button></div>${treeHtml || '<div class="form-note">Сначала выбери окно во вкладке «Окна» или нажми обновить для активного окна.</div>'}</div>`;
+      if (vision.status === 'pulling' && !state.visionPollTimer) {
+        state.visionPollTimer = setTimeout(async () => { state.visionPollTimer = null; if (state.drawerMode === 'computer' && state.desktopTab === 'screen') await renderComputerDrawer('screen'); }, 2500);
+      }
+    } else {
+      dom.drawerBody.innerHTML = `${computerTabs(tab)}<div class="pc-card"><b>Яндекс Музыка</b><small>Кванта ищет и включает точное совпадение или запускает «Мою волну». Медиаклавиши управляют активной сессией Windows.</small>
+        <form id="musicSearchForm" class="pc-search"><input name="query" placeholder="Трек или исполнитель"><button class="btn small primary" type="submit">Найти и включить</button></form>
+        <div class="pc-media-controls"><button class="btn" data-action="music-open">Открыть Яндекс Музыку</button><button class="btn" data-action="music-wave">Моя волна</button><button class="btn" data-action="music-play">▶ / ⏸</button><button class="btn" data-action="music-prev">⏮</button><button class="btn" data-action="music-next">⏭</button></div></div>`;
+    }
+  } catch (err) {
+    dom.drawerBody.innerHTML = `${computerTabs(tab)}<div class="empty-state">Не удалось загрузить данные: ${escapeHtml(err.message)}</div><button class="btn small" data-action="computer-refresh">Повторить</button>`;
+  }
+}
+
+async function renderMinecraftDrawer() {
+  dom.drawerTitle.textContent = 'Minecraft-серверы';
+  dom.drawerBody.innerHTML = '<div class="empty-state">Проверяю Java и версии Minecraft…</div>';
+  try {
+    const serverData = await api('/api/minecraft/servers');
+    let companionData = { bots: state.minecraftCompanion };
+    try { companionData = await api('/api/minecraft/companion'); } catch (_) { /* companion may be unavailable during startup */ }
+    let versionData = { versions: state.minecraftVersions, latest: state.minecraftLatest };
+    if (!state.minecraftVersions.length) {
+      try { versionData = await api('/api/minecraft/versions'); }
+      catch (err) { versionData = { versions: [], message: `Не удалось получить список версий: ${err.message}` }; }
+    }
+    state.minecraftServers = serverData.servers || [];
+    state.minecraftCompanion = companionData.bots || [];
+    state.minecraftVersions = versionData.versions || [];
+    state.minecraftLatest = versionData.latest || state.minecraftLatest;
+    state.minecraftJava = serverData.java || {};
+    const java = state.minecraftJava;
+    const cards = state.minecraftServers.map((server) => {
+      const bot = state.minecraftCompanion.find((item) => item.server_id === server.id) || { status: 'stopped', events: [] };
+      const botOnline = bot.status === 'online';
+      const botActive = ['connecting', 'connected', 'online', 'stopping'].includes(bot.status);
+      const pos = bot.position && typeof bot.position === 'object'
+        ? `${Number(bot.position.x) || 0}, ${Number(bot.position.y) || 0}, ${Number(bot.position.z) || 0}` : '—';
+      const nearby = (bot.nearby || []).map((item) => `${escapeHtml(item.name)} · ${Number(item.distance) || 0} м`).join(', ') || 'поблизости никого не заметила';
+      const botPanel = `<section class="mc-companion"><div class="pc-card-head"><div><b>Компаньон Кванты</b><small>${botOnline ? `Здоровье ${Number(bot.health) || 0}/20 · сытость ${Number(bot.food) || 0}/20 · XYZ ${escapeHtml(pos)}` : escapeHtml(bot.error || (bot.status === 'connecting' ? 'Подключается к миру…' : 'Бот не подключён'))}</small></div><span class="pc-status ${botOnline ? 'ok' : bot.status === 'error' || bot.status === 'disconnected' ? 'bad' : ''}">${escapeHtml(String(bot.status || 'stopped').toUpperCase())}</span></div>
+        ${botOnline ? `<div class="form-note">Игроки: ${escapeHtml((bot.players || []).join(', ') || 'пока никого')}<br>Существа: ${nearby}</div><form class="pc-search mc-companion-chat" data-id="${escapeAttr(server.id)}"><input name="text" maxlength="200" placeholder="Сообщение в игровой чат" required><button class="btn small" type="submit">Отправить</button><button type="button" class="btn small danger" data-action="mc-bot-stop" data-id="${escapeAttr(server.id)}">Отключить</button></form>`
+          : botActive ? `<div class="pc-row-actions"><button type="button" class="btn small danger" data-action="mc-bot-stop" data-id="${escapeAttr(server.id)}">Отключить</button></div>`
+            : `<form class="pc-search mc-companion-start" data-id="${escapeAttr(server.id)}"><input name="username" maxlength="16" pattern="[A-Za-z0-9_]{1,16}" value="Quanta" aria-label="Имя бота"><button class="btn small primary" type="submit" ${server.status === 'running' ? '' : 'disabled'}>Подключить</button></form>`}
+        ${(bot.events || []).length ? `<div class="mc-bot-events">${bot.events.slice(-4).map((item) => `<div>${escapeHtml(item.text || '')}</div>`).join('')}</div>` : ''}
+        <div class="form-note">Подключается только к этому локальному offline-mode серверу Кванты. Без Microsoft-входа; команды сервера через игровой чат заблокированы. Для Mineflayer нужен Node.js 22+ и установленный пакет.</div></section>`;
+      return `<article class="mc-server"><div class="pc-card-head"><div><b>${escapeHtml(server.name)}</b><small>Minecraft ${escapeHtml(server.version)} · ${escapeHtml(server.address || '')} · ${server.memory_mb} МБ RAM</small></div><span class="pc-status ${server.status === 'running' ? 'ok' : server.status === 'error' ? 'bad' : ''}">${escapeHtml(String(server.status || 'stopped').toUpperCase())}</span></div>
+      ${server.status === 'preparing' || server.status === 'downloading' ? `<progress class="pc-progress" max="100" value="${Math.max(2, Number(server.progress) || 0)}" aria-label="Загрузка сервера Minecraft"></progress><small>${Number(server.progress) || 0}% · ${escapeHtml(server.error || 'Подготавливаю server.jar')}</small>` : ''}
+      ${server.error && server.status === 'error' ? `<div class="form-note error">${escapeHtml(server.error)}</div>` : ''}
+      <div class="pc-row-actions"><button class="btn small primary" data-action="mc-start" data-id="${escapeAttr(server.id)}" ${server.ready && server.status !== 'running' ? '' : 'disabled'}>Запустить</button><button class="btn small danger" data-action="mc-stop" data-id="${escapeAttr(server.id)}" ${server.status === 'running' ? '' : 'disabled'}>Остановить</button><button class="btn small" data-action="mc-logs" data-id="${escapeAttr(server.id)}">Логи</button></div>
+      ${server.status === 'running' ? `<form class="pc-search mc-command-form" data-id="${escapeAttr(server.id)}"><input name="command" maxlength="200" placeholder="Команда консоли, например list"><button class="btn small" type="submit">Отправить</button></form>` : ''}${server.status === 'running' ? botPanel : ''}<pre class="mc-logs hidden" data-logs="${escapeAttr(server.id)}"></pre></article>`;
+    }).join('');
+    dom.drawerBody.innerHTML = `<div class="pc-card"><div class="pc-card-head"><div><b>Локальный Vanilla Java-сервер</b><small>${java.available ? `Java найдена: ${escapeHtml(java.version || '')}` : 'Java не найдена ни в PATH, ни в Minecraft Launcher. Открой Minecraft Launcher для загрузки runtime или установи Java.'}</small></div><span class="pc-status ${java.available ? 'ok' : 'bad'}">${java.available ? 'JAVA OK' : 'НЕТ JAVA'}</span></div>
+      <form id="minecraftCreateForm" class="settings-form"><div class="row"><label class="field"><span>Название</span><input name="name" maxlength="48" placeholder="Например, Друзья" required></label><label class="field"><span>Версия</span><select name="version" required>${state.minecraftVersions.map((version) => `<option value="${escapeAttr(version.id)}" ${version.id === state.minecraftLatest ? 'selected' : ''}>${escapeHtml(version.id)}</option>`).join('')}</select></label></div>
+      <div class="row"><label class="field"><span>Порт</span><input name="port" type="number" min="1024" max="65535" value="25565" required></label><label class="field"><span>RAM, МБ</span><input name="memory_mb" type="number" min="1024" max="8192" step="512" value="2048" required></label><label class="field"><span>Игроки</span><input name="max_players" type="number" min="1" max="100" value="10" required></label></div>
+      <label class="pc-check"><input type="checkbox" name="lan_access"><span>Доступ из локальной сети</span></label><div class="form-note">По умолчанию сервер доступен только на этом ПК. LAN открывает его другим устройствам в вашей сети. Режим offline-mode не проверяет лицензии и позволяет подменять игровые имена — не публикуй сервер в интернете. Память здесь выделяется только Java; оставь запас Windows, игре, Кванте и Ollama.</div>
+      <label class="pc-check pc-eula"><input type="checkbox" name="eula_accepted" required><span>Я прочитал и принимаю <a href="https://www.minecraft.net/en-us/eula" target="_blank" rel="noopener">Minecraft EULA</a>.</span></label>
+      <button class="btn primary" type="submit" ${state.minecraftVersions.length ? '' : 'disabled'}>Создать и загрузить server.jar</button></form></div>
+      <div class="mc-server-list">${cards || '<div class="empty-state">Серверов пока нет. Создай первый выше.</div>'}${versionData.message ? `<div class="form-note">${escapeHtml(versionData.message)}</div>` : ''}</div>`;
+    if ((state.minecraftServers.some((server) => ['preparing','downloading'].includes(server.status)) ||
+         state.minecraftCompanion.some((bot) => ['connecting','connected','online','stopping'].includes(bot.status))) && !state.minecraftPollTimer) {
+      state.minecraftPollTimer = setTimeout(async () => { state.minecraftPollTimer = null; if (state.drawerMode === 'minecraft') await renderMinecraftDrawer(); }, 2500);
+    }
+  } catch (err) {
+    dom.drawerBody.innerHTML = `<div class="empty-state">Не удалось загрузить серверы: ${escapeHtml(err.message)}</div><button class="btn small" data-action="mc-refresh">Повторить</button>`;
+  }
 }
 
 function noteCard(note) {
@@ -1167,7 +1371,7 @@ function renderNotesDrawer() {
       <button type="button" class="btn primary small" data-action="new-note">+ Новая заметка</button>
       <button type="button" class="btn small" data-action="refresh-notes">Обновить</button>
     </div>
-    <div class="form-note" style="margin-bottom:12px">Локальные заметки. Кванта видит их и может дополнять.</div>
+    <div class="form-note u-mb-12">Локальные заметки. Кванта видит их и может дополнять.</div>
     ${cards}`;
 }
 
@@ -1224,6 +1428,7 @@ async function refreshMemory() {
     const data = await api('/api/memory');
     state.memories = data.memory || [];
     if (state.drawerMode === 'memory') renderMemoryDrawer();
+    await refreshMemorySemantic();
   } catch (err) {
     if (state.drawerMode === 'memory') {
       dom.drawerTitle.textContent = 'Память';
@@ -1232,9 +1437,41 @@ async function refreshMemory() {
   }
 }
 
+async function refreshMemorySemantic() {
+  try {
+    state.memorySemantic = await api('/api/memory/semantic');
+    if (state.drawerMode === 'memory') renderMemoryDrawer();
+    if (state.memorySemantic.status === 'loading' && !state.memorySemanticTimer) {
+      state.memorySemanticTimer = setTimeout(async () => {
+        state.memorySemanticTimer = null;
+        await refreshMemorySemantic();
+      }, 1800);
+    }
+  } catch (_) {
+    state.memorySemantic = { status: 'unavailable' };
+  }
+}
+
 function renderMemoryDrawer() {
   state.drawerMode = 'memory';
   dom.drawerTitle.textContent = 'Память Кванты';
+  const semanticStatus = state.memorySemantic || { status: 'checking' };
+  const semanticLabel = semanticStatus.status === 'ready'
+    ? `Семантический поиск работает локально · заметок в индексе: ${Number(semanticStatus.indexed) || 0}`
+    : semanticStatus.status === 'loading'
+      ? `Подготавливаю модель для русского поиска (~${Math.round((Number(semanticStatus.size_gb) || 0.22) * 1000)} МБ)…`
+      : semanticStatus.status === 'dependency_missing'
+        ? 'FastEmbed не установлен. Установи зависимости из requirements.txt, затем перезапусти приложение.'
+        : semanticStatus.status === 'error'
+          ? `Модель не загрузилась: ${semanticStatus.error || 'неизвестная ошибка'}`
+          : semanticStatus.status === 'unavailable'
+            ? 'Статус семантического поиска недоступен.'
+            : 'Лексический поиск работает сразу. Семантическая модель загружается отдельно по запросу.';
+  const semanticAction = semanticStatus.status === 'ready'
+    ? ''
+    : semanticStatus.status === 'dependency_missing'
+      ? ''
+      : `<button type="button" class="btn small" data-action="memory-semantic-start" ${semanticStatus.status === 'loading' || semanticStatus.status === 'checking' ? 'disabled' : ''}>${semanticStatus.status === 'loading' ? 'Загрузка…' : semanticStatus.status === 'error' ? 'Повторить загрузку' : 'Включить · скачать модель'}</button>`;
   const cards = state.memories.length
     ? state.memories.map(memoryCard).join('')
     : '<div class="empty-state"><b>Пока пусто</b>Добавляй только то, что Кванте действительно стоит помнить.</div>';
@@ -1243,7 +1480,8 @@ function renderMemoryDrawer() {
       '<div class="field"><label>Что запомнить</label><textarea id="memoryText" maxlength="600" placeholder="Например: люблю короткие ответы и быстрый темп" required></textarea></div>' +
       '<button type="submit" class="btn primary">Добавить в память</button>' +
     '</form>' +
-    '<div class="form-note" style="margin:10px 0 14px">Записи хранятся локально и попадают в контекст новых чатов. Не сохраняй пароли и секреты. Можно удалить любую запись кнопкой «Забыть».</div>' +
+    '<div class="form-note u-my-10-14">Записи хранятся локально и попадают в контекст новых чатов. Не сохраняй пароли и секреты. Можно удалить любую запись кнопкой «Забыть».</div>' +
+    `<div class="pc-card"><div class="pc-card-head"><div><b>Поиск по смыслу</b><small>${escapeHtml(semanticLabel)}</small></div>${semanticAction}</div><div class="form-note">После первого включения модель ~220 МБ будет храниться локально. Текст заметок не отправляется в интернет.</div></div>` +
     '<div class="memory-list">' + cards + '</div>';
 }
 
@@ -1328,6 +1566,58 @@ function renderProjectsDrawer() {
   dom.drawerBody.innerHTML = `<div class="project-drawer-intro">Цели, решения и следующий шаг сохраняются между привязанными чатами.</div>
     <div class="drawer-actions project-list-head"><b>Все проекты</b><button type="button" class="btn small primary" data-action="new-project">+ Новый проект</button></div>
     ${showForm ? renderProjectForm(editing) : ''}
+    <div class="project-list">${cards}</div>`;
+}
+
+function taskStatusLabel(status) {
+  return ({ queued: 'В очереди', running: 'В работе', waiting_confirmation: 'Нужно подтверждение',
+    interrupted: 'Прервано', paused: 'На паузе', completed: 'Готово', failed: 'Ошибка' })[status] || status || 'Неизвестно';
+}
+
+function taskCard(task) {
+  const resumable = ['interrupted', 'paused', 'failed'].includes(task.status);
+  const plan = (task.plan || []).slice(0, 12);
+  const approval = task.approval || {};
+  const approvalLabel = approval.status === 'approved'
+    ? `Одобрено · ${approval.allow_write ? 'запись в пределах папки включена' : 'изменение файлов выключено'} · команд: ${(approval.commands || []).length}`
+    : approval.status === 'denied' ? 'План отклонён' : approval.status === 'pending' ? 'Ожидается одобрение' : '';
+  return `<article class="project-card">
+    <div class="project-card-head"><b>${escapeHtml(task.request || 'Задача')}</b>
+      <span class="project-status ${escapeAttr(task.status || '')}">${escapeHtml(taskStatusLabel(task.status))}</span>
+    </div>
+    ${plan.length ? `<div class="project-field"><small>ПЛАН</small><ol>${plan.map((item) => `<li>${escapeHtml(item.title || item)}</li>`).join('')}</ol></div>` : ''}
+    ${approvalLabel ? `<div class="project-field"><small>ГРАНИЦЫ</small><div>${escapeHtml(approvalLabel)}${approval.root ? `<br><code>${escapeHtml(approval.root)}</code>` : ''}</div></div>` : ''}
+    <div class="project-field next"><small>ЧЕКПОИНТ</small><div>${escapeHtml(task.checkpoint || 'Пока нет сохранённого шага.')}</div></div>
+    ${task.error ? `<div class="project-field"><small>ОШИБКА</small><div>${escapeHtml(task.error)}</div></div>` : ''}
+    <div class="project-card-actions">
+      ${resumable ? `<button type="button" class="btn small primary" data-action="resume-task" data-id="${escapeAttr(task.id)}">Продолжить</button>` : ''}
+      <button type="button" class="btn small" data-action="open-task-chat" data-chat-id="${escapeAttr(task.chat_id)}">Открыть чат</button>
+    </div>
+    <div class="project-meta">Обновлена ${formatDateTime(task.updated)}</div>
+  </article>`;
+}
+
+async function refreshTasks() {
+  try {
+    const data = await api('/api/tasks');
+    state.tasks = data.tasks || [];
+    if (state.drawerMode === 'tasks') renderTasksDrawer();
+  } catch (err) {
+    if (state.drawerMode === 'tasks') {
+      dom.drawerTitle.textContent = 'Задачи';
+      dom.drawerBody.innerHTML = `<div class="empty-state">Не удалось загрузить задачи: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+}
+
+function renderTasksDrawer() {
+  state.drawerMode = 'tasks';
+  dom.drawerTitle.textContent = 'Задачи';
+  const cards = state.tasks.length
+    ? state.tasks.map(taskCard).join('')
+    : '<div class="empty-state"><b>Задач пока нет</b>Многошаговые поручения сохраняются здесь автоматически.</div>';
+  dom.drawerBody.innerHTML = `<div class="project-drawer-intro">Очередь работает последовательно. План и последний результат сохраняются, прерванную задачу можно возобновить.</div>
+    <div class="drawer-actions project-list-head"><b>История задач</b><button type="button" class="btn small" data-action="refresh-tasks">Обновить</button></div>
     <div class="project-list">${cards}</div>`;
 }
 
@@ -1442,7 +1732,7 @@ function renderWorkflowsDrawer() {
       '<div class="field"><label>Инструкция для Кванты</label><textarea id="workflowPrompt" maxlength="2000" placeholder="Опиши, что нужно сделать и в каком порядке" required></textarea></div>' +
       '<button type="submit" class="btn primary">Сохранить сценарий</button>' +
     '</form>' +
-    '<div class="form-note" style="margin:10px 0 14px">Сценарий подставляет задачу в чат. Действия с файлами и компьютером по-прежнему проходят через выбранный режим доступа.</div>' +
+    '<div class="form-note u-my-10-14">Сценарий подставляет задачу в чат. Действия с файлами и компьютером по-прежнему проходят через выбранный режим доступа.</div>' +
     '<div class="workflow-list">' + cards + '</div>';
 }
 
@@ -1603,10 +1893,10 @@ function renderAnalyticsDrawer() {
   dom.drawerBody.innerHTML = `
     <div class="settings-section">
       <h4>Живая телеметрия</h4>
-      <div class="meter-row"><span>CPU</span><div class="meter"><i style="width:${clamp(cpu, 0, 100)}%"></i></div><b>${cpu.toFixed(0)}%</b></div>
-      <div class="meter-row"><span>RAM</span><div class="meter"><i style="width:${clamp(ram, 0, 100)}%"></i></div><b>${ram.toFixed(0)}%</b></div>
-      <div class="meter-row"><span>DISK</span><div class="meter"><i style="width:${clamp(disk, 0, 100)}%"></i></div><b>${disk.toFixed(0)}%</b></div>
-      <div class="mini-stats" style="margin-top:14px">
+      <div class="meter-row"><span>CPU</span><progress class="meter" max="100" value="${clamp(cpu, 0, 100)}" aria-label="CPU"></progress><b>${cpu.toFixed(0)}%</b></div>
+      <div class="meter-row"><span>RAM</span><progress class="meter" max="100" value="${clamp(ram, 0, 100)}" aria-label="RAM"></progress><b>${ram.toFixed(0)}%</b></div>
+      <div class="meter-row"><span>DISK</span><progress class="meter" max="100" value="${clamp(disk, 0, 100)}" aria-label="DISK"></progress><b>${disk.toFixed(0)}%</b></div>
+      <div class="mini-stats u-mt-14">
         <div><span>${sys.ram_used ?? '—'} / ${sys.ram_total ?? '—'}</span><small>ГБ ОЗУ</small></div>
         <div><span>${formatUptime(sys.uptime)}</span><small>uptime</small></div>
       </div>
@@ -1693,7 +1983,7 @@ function openNoteEditor(note = null) {
       </div>
       <div class="modal-body">
         <div class="field"><label>Заголовок</label><input id="noteTitle" maxlength="200" value="${escapeAttr(note?.title || '')}" placeholder="О чём заметка?" required></div>
-        <div class="field" style="margin-top:10px"><label>Текст</label><textarea id="noteText" placeholder="Текст заметки…">${escapeHtml(note?.text || '')}</textarea></div>
+        <div class="field u-mt-10"><label>Текст</label><textarea id="noteText" placeholder="Текст заметки…">${escapeHtml(note?.text || '')}</textarea></div>
       </div>
       <div class="modal-foot">
         <button type="button" class="btn" data-close>Отмена</button>
@@ -1753,6 +2043,9 @@ async function deleteNote(id) {
 function openSettings() {
   if (!state.settings) return;
   const s = state.settings;
+  const fallbackRoutesText = JSON.stringify((s.fallback_routes || []).map((route) => ({
+    ...route, api_key: route.api_key ? '********' : '',
+  })), null, 2);
   const modelOptions = state.models
     .map((m) => (typeof m === 'string' ? m : m.name))
     .filter(Boolean)
@@ -1773,21 +2066,36 @@ function openSettings() {
             <div class="field"><label>Провайдер</label><select id="setProvider">${opt('ollama', 'Ollama (локально)', s.provider)}${opt('openai', 'OpenAI-совместимый API', s.provider)}</select></div>
             <div class="field"><label>Модель</label><input id="setModel" list="modelOptions" value="${escapeAttr(s.model)}" placeholder="qwen3:4b-instruct"><datalist id="modelOptions">${modelOptions}</datalist></div>
           </div>
-          <div class="field" style="margin-top:10px"><label>Адрес Ollama</label><input id="setOllama" value="${escapeAttr(s.ollama_url)}"></div>
-          <div class="settings-grid" style="margin-top:10px">
+          <div class="field u-mt-10"><label>Адрес Ollama</label><input id="setOllama" value="${escapeAttr(s.ollama_url)}"></div>
+          <div class="settings-grid u-mt-10">
             <div class="field"><label>API URL</label><input id="setApiUrl" value="${escapeAttr(s.api_url)}"></div>
             <div class="field"><label>API-ключ</label><input id="setApiKey" type="password" value="${escapeAttr(s.api_key)}" autocomplete="off"></div>
           </div>
-          <div class="settings-grid" style="margin-top:10px">
+          <div class="route-preset"><div><strong>DeepSeek API</strong><small>Подставляет официальный адрес и модель deepseek-flash для основного провайдера. Нужен личный ключ; запросы тарифицируются DeepSeek.</small></div><button type="button" class="btn" id="addDeepSeekPreset">Подставить настройки</button></div>
+          <div class="settings-section u-mt-14">
+            <div class="switch-row"><span>Переключать модель при сбое основного провайдера</span><label class="switch"><input type="checkbox" id="setFallbackEnabled" ${checked(s.fallback_enabled)}><i></i></label></div>
+            <div class="settings-grid u-mt-10">
+              <div class="field"><label>Резервный провайдер</label><select id="setFallbackProvider">${opt('ollama', 'Ollama (локально)', s.fallback_provider)}${opt('openai', 'OpenAI-совместимый API', s.fallback_provider)}</select></div>
+              <div class="field"><label>Резервная модель</label><input id="setFallbackModel" value="${escapeAttr(s.fallback_model || '')}" placeholder="qwen3:4b-instruct или provider/model:free"></div>
+              <div class="field"><label>Резервный API URL</label><input id="setFallbackApiUrl" value="${escapeAttr(s.fallback_api_url || s.api_url)}"></div>
+              <div class="field"><label>Резервный API-ключ</label><input id="setFallbackApiKey" type="password" value="${escapeAttr(s.fallback_api_key || '')}" autocomplete="off"></div>
+            </div>
+            <div class="route-preset"><div><strong>Облачный вариант с бесплатными моделями</strong><small>OpenRouter выбирает доступную бесплатную чат-модель; список и лимиты меняются у провайдера.</small></div><button type="button" class="btn" id="addOpenRouterPreset">Подставить маршрут</button></div>
+            <div class="field u-mt-10"><label>Ещё резервные маршруты · JSON, до 4</label><textarea id="setFallbackRoutes" rows="4" spellcheck="false">${escapeHtml(fallbackRoutesText)}</textarea></div>
+            <div class="form-note">Маршрут использует OpenAI-compatible API OpenRouter. Введи ключ и включи переключатель выше, чтобы активировать резерв. До этого запросы остаются локальными. При переключении текст задачи и контекст чата отправляются провайдеру. Ключи маршрутов скрыты звёздочками; пул выключен по умолчанию. После первого токена переключения нет. <a href="https://openrouter.ai/collections/free-models" target="_blank" rel="noopener noreferrer">Каталог и текущие условия OpenRouter</a>.</div>
+            <div class="switch-row u-mt-10"><span>Уточнять многошаговый план первой резервной моделью</span><label class="switch"><input type="checkbox" id="setPlannerEnabled" ${checked(s.planner_enabled)}><i></i></label></div>
+            <div class="form-note">Внешняя модель получает текст задачи и черновой план. Исполнять её ответ можно только после твоего отдельного одобрения плана.</div>
+          </div>
+          <div class="settings-grid u-mt-10">
             <div class="field"><label>Температура</label><input id="setTemperature" type="number" min="0" max="2" step="0.05" value="${escapeAttr(s.temperature)}"></div>
             <div class="field"><label>Максимум шагов</label><input id="setMaxSteps" type="number" min="1" max="20" value="${escapeAttr(s.max_steps)}"></div>
           </div>
-          <div class="settings-grid" style="margin-top:10px">
+          <div class="settings-grid u-mt-10">
             <div class="field"><label>Контекст модели</label><select id="setModelContext">${opt('8192', '8K · экономно', String(s.model_context_size))}${opt('12288', '12K · рекомендую', String(s.model_context_size))}${opt('16384', '16K · длинные чаты', String(s.model_context_size))}</select></div>
             <div class="field"><label>Держать модель в памяти</label><select id="setModelKeepAlive">${opt('2m', '2 минуты · меньше RAM', s.model_keep_alive)}${opt('5m', '5 минут · баланс', s.model_keep_alive)}${opt('10m', '10 минут · быстрее повторно', s.model_keep_alive)}</select></div>
           </div>
-          <div class="form-note" style="margin-top:8px">На GTX 1070 8K–12K быстрее освобождают видеопамять. Длинное удержание ускоряет повторный ответ, но занимает память.</div>
-          <div class="switch-row" style="margin-top:10px"><span>Прогревать модель Ollama при запуске (быстрее первый ответ, занимает память)</span><label class="switch"><input type="checkbox" id="setModelWarmup" ${checked(s.model_warmup_on_start)}><i></i></label></div>
+          <div class="form-note u-mt-8">На GTX 1070 8K–12K быстрее освобождают видеопамять. Длинное удержание ускоряет повторный ответ, но занимает память.</div>
+          <div class="switch-row u-mt-10"><span>Прогревать модель Ollama при запуске (быстрее первый ответ, занимает память)</span><label class="switch"><input type="checkbox" id="setModelWarmup" ${checked(s.model_warmup_on_start)}><i></i></label></div>
         </div>
 
         <div class="settings-section">
@@ -1796,7 +2104,7 @@ function openSettings() {
             <div class="field"><label>Обращение (необязательно)</label><input id="setAddress" placeholder="Не использовать имя" value="${escapeAttr(s.address)}"></div>
             <div class="field"><label>Сарказм (1–5)</label><input id="setSarcasm" type="number" min="1" max="5" value="${escapeAttr(s.sarcasm)}"></div>
           </div>
-          <div class="field" style="margin-top:10px"><label>Системная личность</label><textarea id="setPrompt" style="min-height:120px">${escapeHtml(s.system_prompt)}</textarea></div>
+          <div class="field u-mt-10"><label>Системная личность</label><textarea id="setPrompt" class="u-min-height-120">${escapeHtml(s.system_prompt)}</textarea></div>
           <div class="switch-row"><span>Проактивные предложения</span><label class="switch"><input type="checkbox" id="setProactive" ${checked(s.proactive)}><i></i></label></div>
           <div class="switch-row"><span>Подмешивать личную память в новые ответы</span><label class="switch"><input type="checkbox" id="setMemoryEnabled" ${checked(s.memory_enabled)}><i></i></label></div>
           <div class="switch-row"><span>Глобальный вызов Ctrl+Alt+Space</span><label class="switch"><input type="checkbox" id="setGlobalHotkey" ${checked(s.global_hotkey_enabled)}><i></i></label></div>
@@ -1808,20 +2116,23 @@ function openSettings() {
             <div class="field"><label>Режим доступа</label><select id="setAccess">${opt('safe', 'Безопасный', s.access_mode)}${opt('smart', 'Умный', s.access_mode)}${opt('auto', 'Авто', s.access_mode)}</select></div>
             <div class="field"><label>Режим интерфейса</label><select id="setUiMode">${opt('mini', 'Компактный режим', s.ui_mode)}${opt('standard', 'Рабочее окно', s.ui_mode)}${opt('hud', 'Полный экран', s.ui_mode)}</select></div>
           </div>
-          <div class="field" style="margin-top:10px"><label>Рабочая папка</label><input id="setWorkDir" value="${escapeAttr(s.work_dir)}"></div>
-          <div class="field" style="margin-top:10px"><label>Город для погоды</label><input id="setWeatherCity" value="${escapeAttr(s.weather_city)}"></div>
-          <div class="form-note" style="margin-top:8px">Безопасный — только чтение и безопасные действия. Умный — опасное с подтверждением. Авто — без подтверждений; включай осознанно.</div>
+          <div class="field u-mt-10"><label>Рабочая папка</label><input id="setWorkDir" value="${escapeAttr(s.work_dir)}"></div>
+          <div class="field u-mt-10"><label>Город для погоды</label><input id="setWeatherCity" value="${escapeAttr(s.weather_city)}"></div>
+          <div class="form-note u-mt-8">Безопасный — чтение и безопасные действия. В режимах «Умный» и «Авто» команды, запись и другие опасные действия всё равно запрашивают разрешение.</div>
+          <div class="form-note sandbox-status u-mt-8">${state.commandSandbox?.available
+            ? 'Windows Sandbox доступен. Кванта может запускать одобренные команды в отдельной гостевой системе без сети.'
+            : 'Windows Sandbox не установлен. Чтобы включить его, открой PowerShell от имени администратора и выполни: Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All, затем перезагрузи Windows.'}</div>
         </div>
 
         <div class="settings-section">
           <h4>Данные и чувствительный доступ</h4>
           <div class="switch-row"><span>Локальная аналитика</span><label class="switch"><input type="checkbox" id="setAnalytics" ${checked(s.analytics)}><i></i></label></div>
           <div class="switch-row"><span>Заголовки активных окон</span><label class="switch"><input type="checkbox" id="setTitles" ${checked(s.analytics_window_titles)}><i></i></label></div>
-          <div class="settings-grid" style="margin-top:8px">
+          <div class="settings-grid u-mt-8">
             <div class="field"><label>Хранить историю, дней</label><input id="setRetention" type="number" min="1" max="365" value="${escapeAttr(s.analytics_retention_days)}"></div>
             <div class="field"><label>Чувствительный доступ</label><select id="setSensitive">${opt('ask', 'Спрашивать разрешение', s.sensitive_access)}${opt('off', 'Выключен', s.sensitive_access)}</select></div>
           </div>
-          <div class="form-note" style="margin-top:8px">
+          <div class="form-note u-mt-8">
             Историческая аналитика появится на этапе 3. Скрытого кейлоггера нет. Запись ввода и работа с паролями
             будут отдельным протоколом с явным разрешением, индикатором REC и ограничением по приложению.
             Пароли не сохраняются в чате или заметках.
@@ -1832,16 +2143,16 @@ function openSettings() {
           <h4>Голос</h4>
           <div class="settings-grid">
             <div class="switch-row"><span>Голосовой синтез включён</span><label class="switch"><input type="checkbox" id="setVoiceEnabled" ${checked(s.voice_enabled)}><i></i></label></div>
-            <div class="field" style="margin-top:8px"><label>Движок TTS</label><select id="setVoiceEngine">${opt('qwen_talker', 'Qwen-Talker 1.7B VoiceDesign Q8 — голос по промпту', s.voice_engine)}${opt('silero', 'Silero v4 — быстрый русский', s.voice_engine)}${opt('qwen', 'Qwen3-TTS CustomVoice — Serena и другие', s.voice_engine)}${opt('voxcpm', 'VoxCPM2 — локальный голос', s.voice_engine)}${opt('sapi', 'Windows SAPI', s.voice_engine)}</select></div>
-            <div class="field" style="margin-top:8px"><label>Размер модели голоса</label><select id="setTtsModel">${opt('1.7b', '1.7B VoiceDesign · Q8_0', '1.7b')}</select></div>
-            <div class="field" style="margin-top:8px"><label>Профиль</label><select id="setVoiceName">${[['Quanta', 'Quanta — VoiceDesign по промпту'], ['baya', 'Baya — женский (Silero)'], ['kseniya', 'Kseniya — женский (Silero)'], ['xenia', 'Xenia — женский (Silero)'], ['Serena', 'Serena — женский (CustomVoice)'], ['Vivian', 'Vivian — женский (CustomVoice)'], ['Ono_Anna', 'Ono_Anna — женский (CustomVoice)'], ['Sohee', 'Sohee — женский (CustomVoice)']].map(([value, label]) => opt(value, label, s.voice_name || 'Quanta')).join('')}</select></div>
-            <div class="field" style="margin-top:8px"><label>Описание голоса (Qwen VoiceDesign / Qwen / VoxCPM2)</label><input id="setVoiceInstruct" value="${escapeAttr(s.voice_instruct)}"></div>
-            <div class="field" style="margin-top:8px"><label>Скорость речи</label><select id="setTtsSpeed">${opt('0.95', '0.95× — спокойно', String(s.tts_speed ?? 1.0))}${opt('1.0', '1.00× — естественно', String(s.tts_speed ?? 1.0))}${opt('1.05', '1.05× — размеренно', String(s.tts_speed ?? 1.0))}${opt('1.1', '1.10× — бодро', String(s.tts_speed ?? 1.0))}${opt('1.2', '1.20× — быстро', String(s.tts_speed ?? 1.0))}</select></div>
-            <div class="field" style="margin-top:8px"><label>Устройство TTS</label><select id="setVoiceDevice">${opt('cpu', 'CPU — надёжно для этой GTX 1070', s.voice_device)}${opt('auto', 'Авто (GPU/CPU)', s.voice_device)}${opt('cuda', 'GPU CUDA', s.voice_device)}</select></div>
-            <div class="field" style="margin-top:8px"><label>ASR модель</label><select id="setSttModel">${opt('tiny', 'faster-whisper tiny', s.stt_model)}${opt('base', 'faster-whisper base', s.stt_model)}${opt('small', 'faster-whisper small', s.stt_model)}${opt('medium', 'faster-whisper medium', s.stt_model)}</select></div>
-            <div class="field" style="margin-top:8px"><label>Распознавание речи</label><select id="setSttDevice">${opt('auto', 'Авто · GPU, если помещается; иначе CPU', s.stt_device || 'auto')}${opt('cpu', 'CPU · экономно по видеопамяти', s.stt_device || 'auto')}${opt('cuda', 'GPU CUDA · обязательно', s.stt_device || 'auto')}</select></div>
+            <div class="field u-mt-8"><label>Движок TTS</label><select id="setVoiceEngine">${opt('qwen_talker', 'Qwen-Talker 1.7B VoiceDesign Q8 — голос по промпту', s.voice_engine)}${opt('silero', 'Silero v4 — быстрый русский', s.voice_engine)}${opt('qwen', 'Qwen3-TTS CustomVoice — Serena и другие', s.voice_engine)}${opt('voxcpm', 'VoxCPM2 — локальный голос', s.voice_engine)}${opt('sapi', 'Windows SAPI', s.voice_engine)}</select></div>
+            <div class="field u-mt-8"><label>Размер модели голоса</label><select id="setTtsModel">${opt('1.7b', '1.7B VoiceDesign · Q8_0', '1.7b')}</select></div>
+            <div class="field u-mt-8"><label>Профиль</label><select id="setVoiceName">${[['Quanta', 'Quanta — VoiceDesign по промпту'], ['baya', 'Baya — женский (Silero)'], ['kseniya', 'Kseniya — женский (Silero)'], ['xenia', 'Xenia — женский (Silero)'], ['Serena', 'Serena — женский (CustomVoice)'], ['Vivian', 'Vivian — женский (CustomVoice)'], ['Ono_Anna', 'Ono_Anna — женский (CustomVoice)'], ['Sohee', 'Sohee — женский (CustomVoice)']].map(([value, label]) => opt(value, label, s.voice_name || 'Quanta')).join('')}</select></div>
+            <div class="field u-mt-8"><label>Описание голоса (Qwen VoiceDesign / Qwen / VoxCPM2)</label><input id="setVoiceInstruct" value="${escapeAttr(s.voice_instruct)}"></div>
+            <div class="field u-mt-8"><label>Скорость речи</label><select id="setTtsSpeed">${opt('0.95', '0.95× — спокойно', String(s.tts_speed ?? 1.0))}${opt('1.0', '1.00× — естественно', String(s.tts_speed ?? 1.0))}${opt('1.05', '1.05× — размеренно', String(s.tts_speed ?? 1.0))}${opt('1.1', '1.10× — бодро', String(s.tts_speed ?? 1.0))}${opt('1.2', '1.20× — быстро', String(s.tts_speed ?? 1.0))}</select></div>
+            <div class="field u-mt-8"><label>Устройство TTS</label><select id="setVoiceDevice">${opt('cpu', 'CPU — надёжно для этой GTX 1070', s.voice_device)}${opt('auto', 'Авто (GPU/CPU)', s.voice_device)}${opt('cuda', 'GPU CUDA', s.voice_device)}</select></div>
+            <div class="field u-mt-8"><label>ASR модель</label><select id="setSttModel">${opt('tiny', 'faster-whisper tiny', s.stt_model)}${opt('base', 'faster-whisper base', s.stt_model)}${opt('small', 'faster-whisper small', s.stt_model)}${opt('medium', 'faster-whisper medium', s.stt_model)}</select></div>
+            <div class="field u-mt-8"><label>Распознавание речи</label><select id="setSttDevice">${opt('auto', 'Авто · GPU, если помещается; иначе CPU', s.stt_device || 'auto')}${opt('cpu', 'CPU · экономно по видеопамяти', s.stt_device || 'auto')}${opt('cuda', 'GPU CUDA · обязательно', s.stt_device || 'auto')}</select></div>
           </div>
-          <div class="settings-grid" style="margin-top:10px">
+          <div class="settings-grid u-mt-10">
             <div class="switch-row"><span>Числа, даты и время произносить словами</span><label class="switch"><input type="checkbox" id="setSpeechNumbers" ${checked(s.speech_normalize_numbers)}><i></i></label></div>
             <div class="switch-row"><span>Автоударения RUAccent (не применяются к Qwen-Talker)</span><label class="switch"><input type="checkbox" id="setSpeechStress" ${checked(s.speech_auto_stress)}><i></i></label></div>
             <div class="switch-row"><span>Очистка артефактов синтеза Qwen-Talker</span><label class="switch"><input type="checkbox" id="setSpeechNoiseReduction" ${checked(s.speech_noise_reduction ?? true)}><i></i></label></div>
@@ -1849,13 +2160,13 @@ function openSettings() {
             <div class="switch-row"><span>Подавление эха микрофона</span><label class="switch"><input type="checkbox" id="setEchoCancellation" ${checked(s.echo_cancellation)}><i></i></label></div>
             <div class="switch-row"><span>Автоуровень микрофона</span><label class="switch"><input type="checkbox" id="setAutoGain" ${checked(s.auto_gain_control)}><i></i></label></div>
           </div>
-          <div class="form-note" style="margin-top:8px">Числа раскрываются с учётом падежа. RUAccent помечает ударения знаком «+» внутри слова; Qwen-Talker получает обычную русскую орфографию, потому что эти метки искажают звучание. Очистка Qwen-Talker мягко подавляет фоновые артефакты через FFmpeg; микрофон отдельно обрабатывает браузер и драйвер Windows.</div>
-          <div class="form-note" style="margin-top:10px">Qwen-Talker VoiceDesign использует локальную модель 1.7B Q8_0 и точный промпт из файла «промт для голоса.txt». Первый синтез загружает движок и веса; после прогрева модель остаётся в памяти для следующих реплик. Если Q8-модель или Qwen-TTS Studio не найдены, Quanta покажет ошибку здесь.</div>
-          <div class="switch-row" style="margin-top:10px"><span>Автоматически отправлять распознанное</span><label class="switch"><input type="checkbox" id="setVoiceAutoSend" ${checked(s.voice_auto_send)}><i></i></label></div>
-          <div class="switch-row" style="margin-top:8px"><span>Wake word «Кванта» (следующий этап)</span><label class="switch"><input type="checkbox" id="setWakeWord" ${checked(s.wake_word)}><i></i></label></div>
-          <div class="form-note" style="margin-top:10px" id="voiceStatusNote">Проверка возможностей…</div>
-          <div class="form-note" style="margin-top:6px" id="voiceProcessingStatusNote">Проверка RUAccent…</div>
-          <div class="form-note" style="margin-top:6px" id="voiceInputStatusNote">Параметры шумоподавления проверятся при первой записи.</div>
+          <div class="form-note u-mt-8">Числа раскрываются с учётом падежа. RUAccent помечает ударения знаком «+» внутри слова; Qwen-Talker получает обычную русскую орфографию, потому что эти метки искажают звучание. Очистка Qwen-Talker мягко подавляет фоновые артефакты через FFmpeg; микрофон отдельно обрабатывает браузер и драйвер Windows.</div>
+          <div class="form-note u-mt-10">Qwen-Talker VoiceDesign использует локальную модель 1.7B Q8_0 и точный промпт из файла «промт для голоса.txt». Первый синтез загружает движок и веса; после прогрева модель остаётся в памяти для следующих реплик. Если Q8-модель или Qwen-TTS Studio не найдены, Quanta покажет ошибку здесь.</div>
+          <div class="switch-row u-mt-10"><span>Автоматически отправлять распознанное</span><label class="switch"><input type="checkbox" id="setVoiceAutoSend" ${checked(s.voice_auto_send)}><i></i></label></div>
+          <div class="switch-row u-mt-8"><span>Wake word «Кванта» (следующий этап)</span><label class="switch"><input type="checkbox" id="setWakeWord" ${checked(s.wake_word)}><i></i></label></div>
+          <div class="form-note u-mt-10" id="voiceStatusNote">Проверка возможностей…</div>
+          <div class="form-note u-mt-6" id="voiceProcessingStatusNote">Проверка RUAccent…</div>
+          <div class="form-note u-mt-6" id="voiceInputStatusNote">Параметры шумоподавления проверятся при первой записи.</div>
         </div>
 
         <div class="settings-section">
@@ -1864,11 +2175,11 @@ function openSettings() {
             <div class="field"><label>Порт сервера</label><input value="127.0.0.1:8765" disabled></div>
             <div class="field"><label>Версия</label><input value="${escapeAttr(state.version)}" disabled></div>
           </div>
-          <div class="drawer-actions" style="margin-top:12px">
+          <div class="drawer-actions u-mt-12">
             <button type="button" class="btn small" id="settingsCheck">Проверить связь</button>
             <button type="button" class="btn small" id="settingsData">Открыть папку данных</button>
           </div>
-          <button type="button" class="btn danger small" id="settingsShutdown" style="margin-top:10px">Завершить Q.W.A.N.T.A.</button>
+          <button type="button" class="btn danger small u-mt-10" id="settingsShutdown">Завершить Q.W.A.N.T.A.</button>
         </div>
       </div>
       <div class="modal-foot">
@@ -1907,14 +2218,57 @@ function openSettings() {
   updateVoiceInputStatus(modal.el);
 
   const form = modal.el.querySelector('#settingsForm');
+  form.querySelector('#addOpenRouterPreset')?.addEventListener('click', () => {
+    form.querySelector('#setFallbackProvider').value = 'openai';
+    form.querySelector('#setFallbackModel').value = 'openrouter/free';
+    form.querySelector('#setFallbackApiUrl').value = 'https://openrouter.ai/api/v1';
+    form.querySelector('#setFallbackApiKey').focus();
+    toast('Маршрут подготовлен', 'Добавь API-ключ и включи резерв вручную, если решишь отправлять туда запросы.', 'info', 5000);
+  });
+  form.querySelector('#addDeepSeekPreset')?.addEventListener('click', () => {
+    form.querySelector('#setProvider').value = 'openai';
+    form.querySelector('#setModel').value = 'deepseek-flash';
+    form.querySelector('#setApiUrl').value = 'https://api.deepseek.com';
+    form.querySelector('#setApiKey').focus();
+    toast('Настройки DeepSeek подставлены', 'Добавь API-ключ и сохрани настройки. До сохранения провайдер не меняется.', 'info', 5000);
+  });
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
+    let fallbackRoutes = [];
+    const fallbackRoutesText = form.querySelector('#setFallbackRoutes').value.trim();
+    if (fallbackRoutesText) {
+      try {
+        fallbackRoutes = JSON.parse(fallbackRoutesText);
+        if (!Array.isArray(fallbackRoutes)) throw new Error('Нужен JSON-массив');
+        fallbackRoutes = fallbackRoutes.map((route) => {
+          if (!route || typeof route !== 'object' || Array.isArray(route)) return route;
+          const existing = (state.settings?.fallback_routes || []).find((old) =>
+            old.provider === route.provider && old.model === route.model &&
+            (old.api_url || '') === (route.api_url || '') && (old.ollama_url || '') === (route.ollama_url || '')
+          );
+          if (route.api_key === '********' || !Object.prototype.hasOwnProperty.call(route, 'api_key')) {
+            return { ...route, api_key: existing?.api_key || '' };
+          }
+          return route;
+        });
+      } catch (err) {
+        toast('Резервный пул не сохранён', `Проверь JSON маршрутов: ${err.message}`, 'error');
+        return;
+      }
+    }
     const patch = {
       provider: form.querySelector('#setProvider').value,
       model: form.querySelector('#setModel').value.trim(),
       ollama_url: form.querySelector('#setOllama').value.trim(),
       api_url: form.querySelector('#setApiUrl').value.trim(),
       api_key: form.querySelector('#setApiKey').value,
+      fallback_enabled: form.querySelector('#setFallbackEnabled').checked,
+      fallback_provider: form.querySelector('#setFallbackProvider').value,
+      fallback_model: form.querySelector('#setFallbackModel').value.trim(),
+      fallback_api_url: form.querySelector('#setFallbackApiUrl').value.trim(),
+      fallback_api_key: form.querySelector('#setFallbackApiKey').value,
+      fallback_routes: fallbackRoutes,
+      planner_enabled: form.querySelector('#setPlannerEnabled').checked,
       temperature: Number(form.querySelector('#setTemperature').value),
       max_steps: Number(form.querySelector('#setMaxSteps').value),
       model_context_size: Number(form.querySelector('#setModelContext').value),
@@ -2049,9 +2403,9 @@ function applySystem(sys) {
   const cpu = Number(sys.cpu || 0);
   const ram = Number(sys.ram_percent || 0);
   const disk = Number(sys.disk_percent || 0);
-  if (dom.cpuBar) dom.cpuBar.style.width = `${clamp(cpu, 0, 100)}%`;
-  if (dom.ramBar) dom.ramBar.style.width = `${clamp(ram, 0, 100)}%`;
-  if (dom.diskBar) dom.diskBar.style.width = `${clamp(disk, 0, 100)}%`;
+  if (dom.cpuBar) dom.cpuBar.value = clamp(cpu, 0, 100);
+  if (dom.ramBar) dom.ramBar.value = clamp(ram, 0, 100);
+  if (dom.diskBar) dom.diskBar.value = clamp(disk, 0, 100);
   if (dom.cpuVal) dom.cpuVal.textContent = `${Math.round(cpu)}%`;
   if (dom.ramVal) dom.ramVal.textContent = `${Math.round(ram)}%`;
   if (dom.diskVal) dom.diskVal.textContent = `${Math.round(disk)}%`;
@@ -2207,7 +2561,7 @@ async function sendRecording(recorder) {
   try {
     const response = await fetch('/api/voice/transcribe', {
       method: 'POST',
-      headers: { 'Content-Type': mime },
+      headers: { 'Content-Type': mime, 'X-Quanta-Session': sessionToken },
       body: buffer,
     });
     info = await response.json();
@@ -2582,6 +2936,10 @@ async function pollEvents() {
         toast('Напоминание', reminder.text || '', 'warn', 12000);
         beep();
         await refreshReminders();
+      } else if (event.type === 'task_completed') {
+        const task = event.task || {};
+        toast('Задача завершена', task.request || 'Сохранённый план выполнен.', 'success', 9000);
+        if (state.drawerMode === 'tasks') await refreshTasks();
       } else if (event.message) {
         toast('Q.W.A.N.T.A.', event.message, 'info', 6000);
       }
@@ -2729,7 +3087,7 @@ function updateClock() {
 
 /* ------------------------------------------------------------------ boot/init */
 function setBootProgress(percent) {
-  if (dom.bootBar) dom.bootBar.style.width = `${clamp(percent, 0, 100)}%`;
+  if (dom.bootBar) dom.bootBar.value = clamp(percent, 0, 100);
 }
 
 function hideBoot(immediate = false) {
@@ -2739,9 +3097,9 @@ function hideBoot(immediate = false) {
   if (!dom.boot) return;
   dom.boot.classList.add('done');
   if (immediate) {
-    dom.boot.style.display = 'none';
+    dom.boot.classList.add('hidden');
   } else {
-    setTimeout(() => { if (dom.boot) dom.boot.style.display = 'none'; }, 220);
+    setTimeout(() => { if (dom.boot) dom.boot.classList.add('hidden'); }, 220);
   }
 }
 
@@ -2749,8 +3107,8 @@ function bootError(err) {
   if (state.bootTimer) clearInterval(state.bootTimer);
   if (dom.bootLog) dom.bootLog.textContent = `Сервер не отвечает: ${err.message || err}`;
   if (dom.bootBar) {
-    dom.bootBar.style.width = '100%';
-    dom.bootBar.style.background = 'linear-gradient(90deg,#fb7185,#8b5cf6)';
+    dom.bootBar.value = 100;
+    dom.bootBar.classList.add('error');
   }
   if (dom.bootSkip) {
     dom.bootSkip.textContent = 'нажми, чтобы повторить';
@@ -2771,8 +3129,12 @@ function loadBootSequence() {
 
 function autoGrowInput() {
   if (!dom.input) return;
-  dom.input.style.height = 'auto';
-  dom.input.style.height = `${Math.min(dom.input.scrollHeight, 180)}px`;
+  dom.input.rows = 1;
+  const styles = getComputedStyle(dom.input);
+  const lineHeight = Number.parseFloat(styles.lineHeight) || 19;
+  const verticalPadding = (Number.parseFloat(styles.paddingTop) || 0) + (Number.parseFloat(styles.paddingBottom) || 0);
+  const contentHeight = Math.max(lineHeight, dom.input.scrollHeight - verticalPadding);
+  dom.input.rows = Math.max(1, Math.min(9, Math.ceil(contentHeight / lineHeight)));
 }
 
 function handlePreset(prompt) {
@@ -2909,7 +3271,96 @@ function bindEvents() {
     if (!button) return;
     const action = button.dataset.action;
     const id = button.dataset.id || '';
-    if (action === 'new-note') openNoteEditor();
+    if (action === 'refresh-tasks') await refreshTasks();
+    else if (action === 'open-task-chat') {
+      closeDrawer();
+      await openChat(button.dataset.chatId || '');
+    }
+    else if (action === 'resume-task') {
+      const task = state.tasks.find((item) => item.id === id);
+      if (!task) return;
+      closeDrawer();
+      await openChat(task.chat_id);
+      const context = `Продолжи исходную задачу из истории чата с сохранённого чекпоинта: ${task.checkpoint || 'план отсутствует'}. Не повторяй уже подтверждённые действия.`;
+      await sendMessage(context, task.id);
+    }
+    else if (action === 'computer-tab') { state.desktopQuery = ''; await renderComputerDrawer(button.dataset.tab); }
+    else if (action === 'computer-refresh') await renderComputerDrawer(state.desktopTab);
+    else if (action === 'pc-launch') {
+      try { const result = await api('/api/desktop/apps/open', { method: 'POST', body: JSON.stringify({ name: button.dataset.name }) }); toast(result.text || 'Приложение запущено', '', 'success'); }
+      catch (err) { toast('Не удалось открыть', err.message, 'error'); }
+    }
+    else if (action === 'pc-focus' || action === 'pc-close-window') {
+      try {
+        const route = action === 'pc-focus' ? 'focus' : 'close';
+        const result = await api('/api/desktop/windows/' + route, { method: 'POST', body: JSON.stringify({ name: button.dataset.name }) });
+        toast(result.text || 'Готово', '', 'success');
+        if (route === 'close') await renderComputerDrawer('windows');
+      } catch (err) { toast('Не удалось выполнить', err.message, 'error'); }
+    }
+    else if (action === 'pc-read-tree' || action === 'pc-refresh-tree') {
+      try {
+        const hwnd = action === 'pc-read-tree' ? Number(button.dataset.hwnd || 0) : Number(state.desktopTreeHwnd || 0);
+        const result = await api('/api/desktop/tree?hwnd=' + encodeURIComponent(hwnd));
+        state.desktopTree = result;
+        state.desktopTreeHwnd = Number(result.window?.hwnd || hwnd || 0);
+        await renderComputerDrawer('screen');
+      } catch (err) { toast('UI Automation не прочитала окно', err.message, 'error'); }
+    }
+    else if (action === 'pc-ui-action') {
+      try {
+        const payload = { hwnd: Number(button.dataset.hwnd), path: JSON.parse(button.dataset.path || '[]'), action: button.dataset.kind,
+          expected_name: button.dataset.name || '', expected_type: button.dataset.type || '', expected_automation_id: button.dataset.id || '' };
+        if (payload.action === 'set_value') payload.value = button.closest('form')?.querySelector('input')?.value || '';
+        const result = await api('/api/desktop/tree/action', { method: 'POST', body: JSON.stringify(payload) });
+        toast(result.text || 'Действие выполнено', '', 'success');
+      } catch (err) { toast('Действие отменено или не выполнено', err.message, 'error'); }
+    }
+    else if (action === 'vision-pull') {
+      try {
+        const model = $('#visionModelSelect')?.value || 'qwen3-vl:2b';
+        await api('/api/vision/pull', { method: 'POST', body: JSON.stringify({ model }) });
+        toast('Загрузка vision-модели началась', model, 'success');
+        await renderComputerDrawer('screen');
+      } catch (err) { toast('Не удалось загрузить модель', err.message, 'error'); }
+    }
+    else if (action === 'vision-analyze') {
+      const resultBox = $('#visionResult', dom.drawerBody);
+      if (resultBox) resultBox.innerHTML = '<div class="form-note">Снимаю экран и жду ответ локальной модели…</div>';
+      try {
+        const result = await api('/api/desktop/vision', { method: 'POST', body: JSON.stringify({ prompt: $('#visionPrompt')?.value || '' }) });
+        const image = result.media?.find((item) => item.type === 'image');
+        if (resultBox) resultBox.innerHTML = `<div>${escapeHtml(result.text || '')}</div>${image ? `<img class="pc-screenshot" src="${escapeAttr(image.url)}" alt="Снимок экрана для анализа">` : ''}`;
+      } catch (err) { if (resultBox) resultBox.innerHTML = `<div class="form-note error">${escapeHtml(err.message)}</div>`; }
+    }
+    else if (action.startsWith('music-')) {
+      const key = { 'music-open': 'open', 'music-wave': 'wave', 'music-play': 'play_pause', 'music-prev': 'previous', 'music-next': 'next' }[action];
+      if (key) try {
+        const result = await api('/api/desktop/music', { method: 'POST', body: JSON.stringify({ action: key }) });
+        if (key !== 'open') toast(result.text || 'Медиаклавиша отправлена', '', 'success');
+      } catch (err) { toast('Яндекс Музыка', err.message, 'error'); }
+    }
+    else if (action === 'mc-refresh') await renderMinecraftDrawer();
+    else if (action === 'mc-start' || action === 'mc-stop') {
+      try {
+        await api(`/api/minecraft/servers/${encodeURIComponent(id)}/${action === 'mc-start' ? 'start' : 'stop'}`, { method: 'POST', body: '{}' });
+        await renderMinecraftDrawer();
+      } catch (err) { toast('Minecraft-сервер', err.message, 'error'); }
+    }
+    else if (action === 'mc-bot-stop') {
+      try {
+        await api(`/api/minecraft/companion/${encodeURIComponent(id)}/stop`, { method: 'POST', body: '{}' });
+        await renderMinecraftDrawer();
+      } catch (err) { toast('Minecraft-компаньон', err.message, 'error'); }
+    }
+    else if (action === 'mc-logs') {
+      try {
+        const result = await api(`/api/minecraft/servers/${encodeURIComponent(id)}/logs`);
+        const block = $(`[data-logs="${CSS.escape(id)}"]`, dom.drawerBody);
+        if (block) { block.textContent = (result.logs || []).join('\n') || 'Лог пока пуст.'; block.classList.toggle('hidden', false); }
+      } catch (err) { toast('Не удалось загрузить логи', err.message, 'error'); }
+    }
+    else if (action === 'new-note') openNoteEditor();
     else if (action === 'refresh-notes') refreshNotes();
     else if (action === 'edit-note') openNoteEditor(state.notes.find((note) => note.id === id));
     else if (action === 'delete-note') deleteNote(id);
@@ -2924,6 +3375,18 @@ function bindEvents() {
     else if (action === 'refresh-reminders') refreshReminders();
     else if (action === 'done-reminder') markReminderDone(id);
     else if (action === 'delete-reminder') deleteReminder(id);
+    else if (action === 'memory-semantic-start') {
+      button.disabled = true;
+      try {
+        state.memorySemantic = await api('/api/memory/semantic', { method: 'POST', body: '{}' });
+        renderMemoryDrawer();
+        toast('Готовлю локальный поиск', `Модель ~${Math.round((Number(state.memorySemantic.size_gb) || 0.22) * 1000)} МБ загружается в фоне.`, 'info', 5000);
+        await refreshMemorySemantic();
+      } catch (err) {
+        button.disabled = false;
+        toast('Не удалось включить поиск', err.message, 'error');
+      }
+    }
     else if (action === 'delete-memory') forgetMemory(id);
     else if (action === 'delete-workflow') deleteWorkflow(id);
     else if (action === 'run-workflow') runWorkflow(id);
@@ -2937,8 +3400,97 @@ function bindEvents() {
     }
   });
 
+  dom.drawerBody?.addEventListener('change', (event) => {
+    if (event.target?.id !== 'visionModelSelect') return;
+    const modelButton = $('[data-action="vision-pull"]', dom.drawerBody);
+    const analyzeButton = $('#visionAnalyzeButton', dom.drawerBody);
+    const sameModel = event.target.value === state.visionStatus?.model;
+    const installed = Boolean(state.visionStatus?.installed && sameModel);
+    if (modelButton) {
+      modelButton.disabled = !state.visionStatus?.available || !state.visionStatus?.supported || (sameModel && installed);
+      modelButton.textContent = installed ? 'Модель загружена' : 'Загрузить модель';
+    }
+    if (analyzeButton) analyzeButton.disabled = !installed || !state.visionStatus?.supported;
+  });
+
   dom.drawerBody?.addEventListener('submit', async (event) => {
     const formId = event.target.id;
+    const target = event.target;
+    if (formId === 'pcSearchForm' || formId === 'pcWindowSearchForm') {
+      event.preventDefault();
+      state.desktopQuery = new FormData(target).get('query')?.toString().trim() || '';
+      await renderComputerDrawer(formId === 'pcSearchForm' ? 'apps' : 'windows');
+      return;
+    }
+    if (formId === 'pcPathForm') {
+      event.preventDefault();
+      const path = new FormData(target).get('path')?.toString().trim() || '';
+      try { const result = await api('/api/open', { method: 'POST', body: JSON.stringify({ path }) }); toast(result.text || 'Открываю путь', '', result.ok ? 'success' : 'error'); }
+      catch (err) { toast('Не удалось открыть путь', err.message, 'error'); }
+      return;
+    }
+    if (formId === 'musicSearchForm') {
+      event.preventDefault();
+      const query = new FormData(target).get('query')?.toString().trim() || '';
+      if (!query) return;
+      try { const result = await api('/api/desktop/music', { method: 'POST', body: JSON.stringify({ action: 'search', query }) }); toast(result.text || 'Открываю поиск', '', 'success'); }
+      catch (err) { toast('Поиск в Яндекс Музыке', err.message, 'error'); }
+      return;
+    }
+    if (target.matches('form[data-form="pc-ui-value"]')) {
+      event.preventDefault();
+      const payload = { hwnd: Number(target.dataset.hwnd), path: JSON.parse(target.dataset.path || '[]'), action: 'set_value',
+        expected_name: target.dataset.name || '', expected_type: target.dataset.type || '', expected_automation_id: target.dataset.id || '',
+        value: target.querySelector('input')?.value || '' };
+      try { const result = await api('/api/desktop/tree/action', { method: 'POST', body: JSON.stringify(payload) }); toast(result.text || 'Значение введено', '', 'success'); }
+      catch (err) { toast('Не удалось заполнить поле', err.message, 'error'); }
+      return;
+    }
+    if (target.matches('.mc-command-form')) {
+      event.preventDefault();
+      const command = new FormData(target).get('command')?.toString().trim() || '';
+      try { const result = await api(`/api/minecraft/servers/${encodeURIComponent(target.dataset.id)}/command`, { method: 'POST', body: JSON.stringify({ command }) }); toast(result.text || 'Команда отправлена', '', 'success'); }
+      catch (err) { toast('Команда Minecraft', err.message, 'error'); }
+      return;
+    }
+    if (target.matches('.mc-companion-start')) {
+      event.preventDefault();
+      const username = new FormData(target).get('username')?.toString().trim() || 'Quanta';
+      try {
+        await api(`/api/minecraft/companion/${encodeURIComponent(target.dataset.id)}/start`, {
+          method: 'POST', body: JSON.stringify({ username }),
+        });
+        toast('Подключаю компаньона', 'Бот войдёт только в локальный сервер Quanta.', 'success');
+        await renderMinecraftDrawer();
+      } catch (err) { toast('Не удалось подключить компаньона', err.message, 'error'); }
+      return;
+    }
+    if (target.matches('.mc-companion-chat')) {
+      event.preventDefault();
+      const field = target.querySelector('[name="text"]');
+      const text = field?.value.trim() || '';
+      try {
+        await api(`/api/minecraft/companion/${encodeURIComponent(target.dataset.id)}/chat`, {
+          method: 'POST', body: JSON.stringify({ text }),
+        });
+        if (field) field.value = '';
+      } catch (err) { toast('Игровой чат', err.message, 'error'); }
+      return;
+    }
+    if (formId === 'minecraftCreateForm') {
+      event.preventDefault();
+      const data = new FormData(target);
+      try {
+        await api('/api/minecraft/servers', { method: 'POST', body: JSON.stringify({
+          name: data.get('name'), version: data.get('version'), port: Number(data.get('port')),
+          memory_mb: Number(data.get('memory_mb')), max_players: Number(data.get('max_players')),
+          lan_access: data.get('lan_access') === 'on', eula_accepted: data.get('eula_accepted') === 'on',
+        }) });
+        toast('Создаю сервер Minecraft', 'Скачивание и проверка server.jar идут в фоне.', 'success');
+        await renderMinecraftDrawer();
+      } catch (err) { toast('Не удалось создать сервер', err.message, 'error'); }
+      return;
+    }
     if (!['reminderForm', 'memoryForm', 'workflowForm', 'projectForm'].includes(formId)) return;
     event.preventDefault();
     if (formId === 'projectForm') {
@@ -3008,6 +3560,7 @@ async function init() {
     state.notes = data.notes || [];
     state.reminders = data.reminders || [];
     state.dataDir = data.data_dir || '';
+    state.commandSandbox = data.command_sandbox || null;
     state.version = data.version || '0.1.0';
     state.system = data.system || null;
     applySettingsToUI();

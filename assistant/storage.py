@@ -13,12 +13,15 @@ import threading
 import time
 import uuid
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .semantic_memory import SemanticMemoryIndex
+from .secret_store import DPAPISecretStore, SECRET_MASK
+
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.path.expandvars(os.environ.get("QUANTA_DATA_DIR") or str(ROOT / "data"))).expanduser().resolve()
 MEDIA_DIR = DATA_DIR / "media"
 CHATS_DIR = DATA_DIR / "chats"
 UI_DIR = ROOT / "ui"
@@ -62,8 +65,16 @@ DEFAULT_SYSTEM_PROMPT = """Ты — Q.W.A.N.T.A. (Кванта), расшифр�
 DEFAULT_SETTINGS: dict[str, Any] = {
     "provider": "ollama",
     "ollama_url": "http://127.0.0.1:11434",
+    "vision_model": "qwen3-vl:2b",
     "api_url": "https://api.openai.com/v1",
     "api_key": "",
+    "fallback_enabled": False,
+    "planner_enabled": False,
+    "fallback_provider": "openai",
+    "fallback_model": "",
+    "fallback_api_url": "https://api.openai.com/v1",
+    "fallback_api_key": "",
+    "fallback_routes": [],
     "model": "qwen3:4b-instruct",
     "temperature": 0.65,
     "max_steps": 8,
@@ -119,14 +130,12 @@ DEFAULT_WORKFLOWS = [
 
 
 def _read_json(path: Path, default: Any) -> Any:
-    last_error: OSError | None = None
     for _ in range(20):
         try:
             with path.open("r", encoding="utf-8") as fh:
                 return json.load(fh)
-        except PermissionError as exc:
+        except PermissionError:
             # Windows briefly locks files during replace / AV scans.
-            last_error = exc
             time.sleep(0.05)
         except (OSError, ValueError):
             return deepcopy(default)
@@ -172,33 +181,70 @@ class Store:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self.settings_path = DATA_DIR / "settings.json"
+        self._secret_store = DPAPISecretStore(DATA_DIR / "api_secrets.json")
         self.notes_path = DATA_DIR / "notes.json"
         self.reminders_path = DATA_DIR / "reminders.json"
         self.memory_path = DATA_DIR / "memory.json"
+        self.semantic_memory = SemanticMemoryIndex(DATA_DIR / "models" / "embeddings",
+                                                  DATA_DIR / "memory_vectors.json")
         self.actions_path = DATA_DIR / "actions.json"
         self.workflows_path = DATA_DIR / "workflows.json"
         self.projects_path = DATA_DIR / "projects.json"
+        self.tasks_path = DATA_DIR / "tasks.json"
         self.chat_index_path = DATA_DIR / "chat_index.json"
         self._events: list[dict[str, Any]] = []
         settings = _read_json(self.settings_path, {})
         if not isinstance(settings, dict):
             settings = {}
+        secrets = self._merge_secret_sources(settings, self._secret_store.load())
+        if self._has_secret_fields(settings):
+            if self._has_plaintext_secrets(settings):
+                self._secret_store.save(secrets)
+            _write_json(self.settings_path, self._settings_without_secrets(settings))
         self._settings = deepcopy(DEFAULT_SETTINGS)
-        self._settings.update({k: v for k, v in settings.items() if k in DEFAULT_SETTINGS})
+        self._settings.update({k: v for k, v in self._settings_without_secrets(settings).items() if k in DEFAULT_SETTINGS})
+        self._restore_secrets(self._settings, secrets)
+        self._known_secrets: set[str] = set()
+        self._remember_secrets(self._settings)
         self._notes: list[dict[str, Any]] = _read_json(self.notes_path, [])
         self._reminders: list[dict[str, Any]] = _read_json(self.reminders_path, [])
         self._memory: list[dict[str, Any]] = _read_json(self.memory_path, [])
         self._actions: list[dict[str, Any]] = _read_json(self.actions_path, [])
         self._workflows: list[dict[str, Any]] = _read_json(self.workflows_path, [])
         self._projects: list[dict[str, Any]] = _read_json(self.projects_path, [])
+        self._tasks: list[dict[str, Any]] = _read_json(self.tasks_path, [])
         self._chat_index: dict[str, dict[str, Any]] = _read_json(self.chat_index_path, {})
         self._chat_index_ready = self.chat_index_path.is_file() and isinstance(self._chat_index, dict)
-        if not isinstance(self._notes, list): self._notes = []
-        if not isinstance(self._reminders, list): self._reminders = []
-        if not isinstance(self._memory, list): self._memory = []
-        if not isinstance(self._actions, list): self._actions = []
-        if not isinstance(self._workflows, list): self._workflows = []
-        if not isinstance(self._projects, list): self._projects = []
+        if not isinstance(self._notes, list):
+            self._notes = []
+        if not isinstance(self._reminders, list):
+            self._reminders = []
+        if not isinstance(self._memory, list):
+            self._memory = []
+        if not isinstance(self._actions, list):
+            self._actions = []
+        if not isinstance(self._workflows, list):
+            self._workflows = []
+        if not isinstance(self._projects, list):
+            self._projects = []
+        if not isinstance(self._tasks, list):
+            self._tasks = []
+        self._tasks = [task for task in self._tasks if isinstance(task, dict)]
+        recovered_tasks = False
+        for task in self._tasks:
+            if task.get("status") in ("queued", "running", "waiting_confirmation"):
+                task["status"] = "interrupted"
+                recovery_note = "Процесс остановился вместе с приложением. Можно продолжить из истории чата."
+                task["checkpoint"] = recovery_note
+                history = task.get("checkpoint_history")
+                if not isinstance(history, list):
+                    history = []
+                history.append({"text": recovery_note, "type": "recovery", "at": now_iso()})
+                task["checkpoint_history"] = history[-30:]
+                task["updated"] = now_iso()
+                recovered_tasks = True
+        if recovered_tasks:
+            _write_json(self.tasks_path, self._tasks)
         if not self._workflows:
             self._workflows = deepcopy(DEFAULT_WORKFLOWS)
 
@@ -208,6 +254,122 @@ class Store:
         with self._lock:
             return deepcopy(self._settings)
 
+    @staticmethod
+    def _settings_without_secrets(settings: dict[str, Any]) -> dict[str, Any]:
+        clean = deepcopy(settings)
+        clean.pop("api_key", None)
+        clean.pop("fallback_api_key", None)
+        routes = clean.get("fallback_routes")
+        if isinstance(routes, list):
+            for route in routes:
+                if isinstance(route, dict):
+                    route.pop("api_key", None)
+        return clean
+
+    @staticmethod
+    def _has_secret_fields(settings: dict[str, Any]) -> bool:
+        if "api_key" in settings or "fallback_api_key" in settings:
+            return True
+        routes = settings.get("fallback_routes")
+        return isinstance(routes, list) and any(isinstance(route, dict) and "api_key" in route for route in routes)
+
+    @staticmethod
+    def _has_plaintext_secrets(settings: dict[str, Any]) -> bool:
+        for key in ("api_key", "fallback_api_key"):
+            value = settings.get(key)
+            if value not in (None, "", SECRET_MASK):
+                return True
+        routes = settings.get("fallback_routes")
+        if isinstance(routes, list):
+            return any(
+                isinstance(route, dict) and route.get("api_key") not in (None, "", SECRET_MASK)
+                for route in routes
+            )
+        return False
+
+    @staticmethod
+    def _merge_secret_sources(settings: dict[str, Any], protected: dict[str, Any]) -> dict[str, Any]:
+        result = {
+            "api_key": str(protected.get("api_key") or ""),
+            "fallback_api_key": str(protected.get("fallback_api_key") or ""),
+            "fallback_routes": [],
+        }
+        for key in ("api_key", "fallback_api_key"):
+            legacy = settings.get(key)
+            if legacy not in (None, "", SECRET_MASK):
+                result[key] = str(legacy)
+
+        stored_routes = protected.get("fallback_routes")
+        if not isinstance(stored_routes, list):
+            stored_routes = []
+        settings_routes = settings.get("fallback_routes")
+        if not isinstance(settings_routes, list):
+            settings_routes = []
+        for index, route in enumerate(settings_routes[:4]):
+            stored = stored_routes[index] if index < len(stored_routes) else ""
+            if not isinstance(route, dict):
+                result["fallback_routes"].append(str(stored or ""))
+                continue
+            legacy = route.get("api_key")
+            if legacy not in (None, "", SECRET_MASK):
+                stored = legacy
+            result["fallback_routes"].append(str(stored or ""))
+        return result
+
+    @staticmethod
+    def _restore_secrets(settings: dict[str, Any], secrets: dict[str, Any]) -> None:
+        settings["api_key"] = str(secrets.get("api_key") or "")
+        settings["fallback_api_key"] = str(secrets.get("fallback_api_key") or "")
+        route_secrets = secrets.get("fallback_routes")
+        if not isinstance(route_secrets, list):
+            route_secrets = []
+        routes = settings.get("fallback_routes")
+        if isinstance(routes, list):
+            for index, route in enumerate(routes):
+                if isinstance(route, dict):
+                    route["api_key"] = str(route_secrets[index] or "") if index < len(route_secrets) else ""
+
+    @staticmethod
+    def _secret_values(settings: dict[str, Any]) -> dict[str, Any]:
+        routes = settings.get("fallback_routes")
+        route_keys = [str(route.get("api_key") or "") for route in routes if isinstance(route, dict)] if isinstance(routes, list) else []
+        return {
+            "api_key": str(settings.get("api_key") or ""),
+            "fallback_api_key": str(settings.get("fallback_api_key") or ""),
+            "fallback_routes": route_keys[:4],
+        }
+
+    def _remember_secrets(self, settings: dict[str, Any]) -> None:
+        values = self._secret_values(settings)
+        self._known_secrets.update(
+            value for value in (values["api_key"], values["fallback_api_key"], *values["fallback_routes"]) if value
+        )
+
+    def public_settings(self) -> dict[str, Any]:
+        """Return settings safe for UI/API serialization, with secrets only masked."""
+        with self._lock:
+            result = deepcopy(self._settings)
+            for key in ("api_key", "fallback_api_key"):
+                result[key] = SECRET_MASK if result.get(key) else ""
+            routes = result.get("fallback_routes")
+            if isinstance(routes, list):
+                for route in routes:
+                    if isinstance(route, dict):
+                        route["api_key"] = SECRET_MASK if route.get("api_key") else ""
+            return result
+
+    def redact_secrets(self, message: str) -> str:
+        """Remove configured credentials from any text passed to the application log."""
+        text = str(message)
+        with self._lock:
+            values = self._secret_values(self._settings)
+            secret_values = self._known_secrets | {
+                value for value in (values["api_key"], values["fallback_api_key"], *values["fallback_routes"]) if value
+            }
+        for secret in sorted((value for value in secret_values if value), key=len, reverse=True):
+            text = text.replace(secret, SECRET_MASK)
+        return text
+
     def save_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(patch, dict):
             raise ValueError("Настройки должны быть объектом")
@@ -215,6 +377,8 @@ class Store:
             merged = deepcopy(self._settings)
             for key, value in patch.items():
                 if key not in DEFAULT_SETTINGS:
+                    continue
+                if key in ("api_key", "fallback_api_key") and value == SECRET_MASK:
                     continue
                 merged[key] = value
 
@@ -235,7 +399,8 @@ class Store:
                 raise ValueError("Время удержания модели должно быть 2, 5 или 10 минут")
             if merged["resource_profile"] not in ("work", "game"):
                 raise ValueError("Профиль ресурсов должен быть «Работа» или «Игра»")
-            for key in ("memory_enabled", "global_hotkey_enabled", "model_warmup_on_start"):
+            for key in ("memory_enabled", "global_hotkey_enabled", "model_warmup_on_start",
+                        "fallback_enabled", "planner_enabled"):
                 merged[key] = bool(merged[key])
             if merged["access_mode"] not in ("safe", "smart", "auto"):
                 raise ValueError("Неизвестный режим доступа")
@@ -251,6 +416,14 @@ class Store:
                 raise ValueError("Неизвестное устройство распознавания речи")
             if merged["provider"] not in ("ollama", "openai"):
                 raise ValueError("Неизвестный провайдер")
+            if merged["fallback_provider"] not in ("ollama", "openai"):
+                raise ValueError("Неизвестный резервный провайдер")
+            for key in ("model", "fallback_model"):
+                merged[key] = str(merged.get(key) or "").strip()[:200]
+            for key in ("ollama_url", "api_url", "fallback_api_url"):
+                merged[key] = str(merged.get(key) or "").strip().rstrip("/")[:500]
+            if merged["vision_model"] not in ("qwen3-vl:2b", "qwen3-vl:4b", "qwen3-vl:8b"):
+                raise ValueError("Неподдерживаемая локальная vision-модель")
             if merged["sensitive_access"] not in ("ask", "off"):
                 merged["sensitive_access"] = "ask"
 
@@ -263,7 +436,8 @@ class Store:
             else:
                 merged["work_dir"] = str(Path.home() / "Desktop")
 
-            for key in ("provider", "ollama_url", "api_url", "api_key", "model",
+            for key in ("provider", "ollama_url", "api_url", "api_key", "fallback_provider",
+                        "fallback_api_url", "fallback_api_key", "fallback_model", "model", "vision_model",
                         "system_prompt", "ui_mode", "voice_engine", "tts_model",
                         "voice_name", "voice_instruct", "voice_device", "weather_city", "address"):
                 if not isinstance(merged[key], str):
@@ -271,12 +445,181 @@ class Store:
 
             merged["model"] = merged["model"].strip() or "qwen3:4b-instruct"
             merged["api_key"] = merged["api_key"].strip()
+            merged["fallback_api_key"] = merged["fallback_api_key"].strip()[:2000]
+            merged["fallback_model"] = merged["fallback_model"].strip()[:200]
+            merged["fallback_api_url"] = merged["fallback_api_url"].strip().rstrip("/")[:500]
+            raw_routes = merged.get("fallback_routes") or []
+            if not isinstance(raw_routes, list):
+                raise ValueError("Резервные маршруты должны быть списком")
+            previous_routes = self._settings.get("fallback_routes")
+            if not isinstance(previous_routes, list):
+                previous_routes = []
+
+            def route_identity(value: dict[str, Any]) -> tuple[str, str, str, str]:
+                return (
+                    str(value.get("provider") or "openai").strip(),
+                    str(value.get("model") or "").strip(),
+                    str(value.get("api_url") or "").strip().rstrip("/"),
+                    str(value.get("ollama_url") or "").strip().rstrip("/"),
+                )
+
+            routes = []
+            for route_index, route in enumerate(raw_routes[:4]):
+                if not isinstance(route, dict):
+                    raise ValueError("Каждый резервный маршрут должен быть объектом")
+                provider = str(route.get("provider") or "openai").strip()
+                if provider not in ("ollama", "openai"):
+                    raise ValueError("В резервном маршруте указан неизвестный провайдер")
+                model = str(route.get("model") or "").strip()[:200]
+                if not model:
+                    raise ValueError("У каждого резервного маршрута должна быть указана модель")
+                normalized_route = {
+                    "provider": provider,
+                    "model": model,
+                    "api_url": str(route.get("api_url") or "").strip().rstrip("/")[:500],
+                    "ollama_url": str(route.get("ollama_url") or "").strip().rstrip("/")[:500],
+                }
+                supplied_key = route.get("api_key")
+                if supplied_key in (None, SECRET_MASK):
+                    old_route = next(
+                        (item for item in previous_routes if isinstance(item, dict) and route_identity(item) == route_identity(normalized_route)),
+                        None,
+                    )
+                    if old_route is None and route_index < len(previous_routes):
+                        old_route = previous_routes[route_index]
+                    route_key = old_route.get("api_key", "") if isinstance(old_route, dict) else ""
+                else:
+                    route_key = supplied_key
+                routes.append({
+                    **normalized_route,
+                    "api_key": str(route_key or "").strip()[:2000],
+                })
+            merged["fallback_routes"] = routes
+            if merged["fallback_enabled"] and not (merged["fallback_model"] or routes):
+                raise ValueError("Укажи резервную модель или маршрут в резервном пуле")
+            if merged["planner_enabled"] and (not merged["fallback_enabled"] or not (merged["fallback_model"] or routes)):
+                raise ValueError("Для сложного планирования сначала включи резервные модели")
             merged["system_prompt"] = merged["system_prompt"].strip() or DEFAULT_SYSTEM_PROMPT
             merged["address"] = merged["address"].strip()
 
+            secret_values = self._secret_values(merged)
+            if any((secret_values["api_key"], secret_values["fallback_api_key"], *secret_values["fallback_routes"])) or self._secret_store.exists():
+                self._secret_store.save(secret_values)
+            _write_json(self.settings_path, self._settings_without_secrets(merged))
             self._settings = merged
-            _write_json(self.settings_path, merged)
+            self._remember_secrets(self._settings)
             return deepcopy(merged)
+
+    # ---------------------------------------------------------------------- tasks
+    def create_task(self, chat_id: str, request: str, *, status: str = "queued") -> dict[str, Any]:
+        self._chat_path(str(chat_id))
+        value = str(request or "").strip()
+        if not value or len(value) > 30000:
+            raise ValueError("Некорректный запрос задачи")
+        if status not in {"queued", "running", "interrupted", "paused", "completed", "failed"}:
+            raise ValueError("Некорректный статус задачи")
+        stamp = now_iso()
+        task = {
+            "id": new_id(), "chat_id": str(chat_id), "request": value,
+            "status": status, "plan": [], "checkpoint": "Запрос поставлен в очередь.",
+            "checkpoint_history": [], "step": 0, "error": "",
+            "approval": {"status": "not_required", "root": "", "allow_write": False,
+                         "sandbox_commands": False, "commands": []},
+            "created": stamp, "updated": stamp,
+        }
+        with self._lock:
+            self._tasks.append(task)
+            self._tasks = self._tasks[-300:]
+            _write_json(self.tasks_path, self._tasks)
+            return deepcopy(task)
+
+    def get_task(self, task_id: str) -> dict[str, Any]:
+        if not _ID_RE.match(str(task_id or "")):
+            raise ValueError("Некорректный идентификатор задачи")
+        with self._lock:
+            task = next((item for item in self._tasks if item.get("id") == task_id), None)
+            if not task:
+                raise FileNotFoundError("Задача не найдена")
+            return deepcopy(task)
+
+    def list_tasks(self, *, chat_id: str = "", status: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            items = [item for item in self._tasks
+                     if (not chat_id or item.get("chat_id") == chat_id)
+                     and (not status or item.get("status") == status)]
+            items.sort(key=lambda item: item.get("updated") or "", reverse=True)
+            return deepcopy(items[:max(1, min(int(limit), 300))])
+
+    def update_task(self, task_id: str, **changes: Any) -> dict[str, Any]:
+        if not _ID_RE.match(str(task_id or "")):
+            raise ValueError("Некорректный идентификатор задачи")
+        allowed_statuses = {"queued", "running", "waiting_confirmation", "interrupted", "paused", "completed", "failed"}
+        with self._lock:
+            task = next((item for item in self._tasks if item.get("id") == task_id), None)
+            if not task:
+                raise FileNotFoundError("Задача не найдена")
+            if "status" in changes:
+                status = str(changes["status"])
+                if status not in allowed_statuses:
+                    raise ValueError("Некорректный статус задачи")
+                task["status"] = status
+            if "plan" in changes:
+                raw_plan = changes["plan"]
+                if not isinstance(raw_plan, list):
+                    raise ValueError("План задачи должен быть списком")
+                plan = []
+                for raw in raw_plan[:20]:
+                    raw_title = raw.get("title") if isinstance(raw, dict) else raw
+                    title = str(raw_title or "").strip()
+                    if title:
+                        raw_status = str(raw.get("status") or "pending") if isinstance(raw, dict) else "pending"
+                        if raw_status not in {"pending", "running", "done", "failed", "skipped"}:
+                            raw_status = "pending"
+                        plan.append({"title": title[:240], "status": raw_status})
+                task["plan"] = plan
+            if "checkpoint" in changes:
+                checkpoint = str(changes["checkpoint"] or "").strip()[:1200]
+                task["checkpoint"] = checkpoint
+                if checkpoint:
+                    history = task.get("checkpoint_history")
+                    if not isinstance(history, list):
+                        history = []
+                    history.append({
+                        "text": checkpoint,
+                        "type": str(changes.get("checkpoint_type") or "progress")[:40],
+                        "at": now_iso(),
+                    })
+                    task["checkpoint_history"] = history[-30:]
+            if "step" in changes:
+                try:
+                    task["step"] = max(0, min(10000, int(changes["step"])))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("Некорректный номер шага") from exc
+            if "error" in changes:
+                task["error"] = str(changes["error"] or "")[:800]
+            if "approval" in changes:
+                raw_approval = changes["approval"]
+                if not isinstance(raw_approval, dict):
+                    raise ValueError("Ограничения задачи должны быть объектом")
+                approval_status = str(raw_approval.get("status") or "not_required")
+                if approval_status not in {"not_required", "pending", "approved", "denied"}:
+                    raise ValueError("Некорректный статус одобрения плана")
+                commands = raw_approval.get("commands") or []
+                if not isinstance(commands, list):
+                    raise ValueError("Список разрешённых команд должен быть списком")
+                normalized_commands = [str(command).strip()[:1000] for command in commands[:20]
+                                       if str(command).strip()]
+                task["approval"] = {
+                    "status": approval_status,
+                    "root": str(raw_approval.get("root") or "")[:1000],
+                    "allow_write": bool(raw_approval.get("allow_write")),
+                    "sandbox_commands": bool(raw_approval.get("sandbox_commands")),
+                    "commands": normalized_commands,
+                    "approved_at": str(raw_approval.get("approved_at") or "")[:80],
+                }
+            task["updated"] = now_iso()
+            _write_json(self.tasks_path, self._tasks)
+            return deepcopy(task)
 
     # --------------------------------------------------------------------- chats
     def _chat_path(self, chat_id: str) -> Path:
@@ -733,13 +1076,44 @@ class Store:
 
     # --------------------------------------------------------------------- memory
     def list_memory(self, query: str = "") -> list[dict[str, Any]]:
+        if query:
+            return self.search_memory(query)
         with self._lock:
             items = deepcopy(self._memory)
-        q = (query or "").strip().casefold()
-        if q:
-            items = [item for item in items if q in str(item.get("text", "")).casefold()]
         items.sort(key=lambda item: item.get("updated", ""), reverse=True)
         return items
+
+    def search_memory(self, query: str, *, limit: int = 12) -> list[dict[str, Any]]:
+        """Use local embeddings when prepared; otherwise rank by word overlap."""
+        value = str(query or "").casefold().replace("ё", "е").strip()
+        tokens = set(re.findall(r"[a-zа-я0-9]{3,}", value))
+        stopwords = {
+            "это", "как", "что", "для", "или", "при", "про", "мне", "меня", "тебе", "его", "ее",
+            "они", "она", "оно", "мы", "вы", "этот", "эта", "эти", "весь", "есть", "был", "будет",
+            "the", "and", "for", "with", "that", "this", "from", "you", "your", "are",
+        }
+        tokens -= stopwords
+        with self._lock:
+            items = deepcopy(self._memory)
+        semantic = self.semantic_memory.search(value, items, limit=limit)
+        if semantic is not None:
+            return semantic
+        if not tokens:
+            items.sort(key=lambda item: item.get("updated", ""), reverse=True)
+            return items[:max(1, min(int(limit), 100))]
+
+        ranked = []
+        for item in items:
+            text = str(item.get("text") or "").casefold().replace("ё", "е")
+            memory_tokens = set(re.findall(r"[a-zа-я0-9]{3,}", text))
+            overlap = sum(1.0 if term in memory_tokens else 0.55 for term in tokens
+                          if term in memory_tokens or any(word.startswith(term) or term.startswith(word)
+                                                          for word in memory_tokens if min(len(term), len(word)) >= 4))
+            phrase_bonus = 3.0 if value and value in text else 0.0
+            if overlap or phrase_bonus:
+                ranked.append((overlap + phrase_bonus, str(item.get("updated") or ""), item))
+        ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        return [row[2] for row in ranked[:max(1, min(int(limit), 100))]]
 
     def create_memory(self, text: str) -> dict[str, Any]:
         value = " ".join(str(text or "").split()).strip()
@@ -774,6 +1148,7 @@ class Store:
             if len(self._memory) == before:
                 return False
             _write_json(self.memory_path, self._memory)
+            self.semantic_memory.remove_memory(memory_id)
             return True
 
     # ------------------------------------------------------------------- workflows

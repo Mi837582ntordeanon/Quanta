@@ -1,7 +1,6 @@
 """Local voice pipeline for Q.W.A.N.T.A.: Silero/Qwen3-TTS synthesis and faster-whisper STT."""
 from __future__ import annotations
 
-import base64
 import gc
 import importlib.util
 import json
@@ -19,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .qwen_talker import model_status as qwen_talker_model_status
-from .storage import DATA_DIR, MEDIA_DIR, ROOT, Store
+from .storage import MEDIA_DIR, ROOT, Store
 from .text_normalize import normalize_for_speech, stress_status
 
 VOICE_DIR = MEDIA_DIR / "voice"
@@ -775,7 +774,6 @@ def speak(text: str, store: Store | None = None) -> dict[str, Any]:
     if tone_control:
         instruct = str(settings.get("voice_instruct") or "").strip() or DEFAULT_INSTRUCT
     speaker = str(settings.get("voice_name") or "").strip() or DEFAULT_SPEAKER
-    last_error: Exception | None = None
     devices = [device, "cpu"] if device == "cuda" else [device]
     for candidate_device in devices:
         try:
@@ -801,7 +799,6 @@ def speak(text: str, store: Store | None = None) -> dict[str, Any]:
                 "speed": applied_speed,
             })
         except Exception as exc:  # noqa: BLE001
-            last_error = exc
             _QWEN_STATE["error"] = str(exc)
     try:
         path = VOICE_DIR / f"quanta_sapi_{uuid.uuid4().hex[:8]}_{int(time.time())}.wav"

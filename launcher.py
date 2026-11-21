@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -16,7 +17,14 @@ import time
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+# In a PyInstaller bundle, source/data files live beside the bootloader in
+# ``_MEIPASS`` (the bundle's internal directory). The user's writable data is
+# deliberately kept outside the bundle, under LocalAppData.
+IS_FROZEN = bool(getattr(sys, "frozen", False))
+ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)).resolve()
+if IS_FROZEN:
+    local_app_data = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    os.environ.setdefault("QUANTA_DATA_DIR", str(local_app_data / "Quanta" / "data"))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -40,10 +48,26 @@ def log(message: str) -> None:
 
 def server_up(port: int) -> bool:
     expected_data = os.path.normcase(os.path.abspath(str(DATA_DIR)))
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=0.5) as resp:
+            page = resp.read().decode("utf-8", "replace")
+        match = re.search(
+            r'<meta\s+name="quanta-session-token"\s+content="([^"]+)"', page,
+            re.IGNORECASE,
+        )
+        if not match:
+            return False
+        session_token = match.group(1)
+    except Exception:
+        return False
+
     for endpoint in ("health", "bootstrap"):
         try:
-            url = f"http://127.0.0.1:{port}/api/{endpoint}"
-            with urllib.request.urlopen(url, timeout=0.5) as resp:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/{endpoint}",
+                headers={"X-Quanta-Session": session_token},
+            )
+            with urllib.request.urlopen(request, timeout=0.5) as resp:
                 data = json.loads(resp.read().decode("utf-8", "replace"))
             if not data.get("ok"):
                 return False
@@ -86,8 +110,9 @@ def start_server(port: int) -> bool:
         out = open(log_path, "a", encoding="utf-8")
         env = dict(os.environ)
         env["QUANTA_PORT"] = str(port)
+        command = [python, "--quanta-server"] if IS_FROZEN else [python, str(ROOT / "server.py")]
         subprocess.Popen(
-            [python, str(ROOT / "server.py")],
+            command,
             cwd=str(ROOT),
             stdout=out,
             stderr=subprocess.STDOUT,
@@ -150,4 +175,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if "--quanta-server" in sys.argv[1:]:
+        from server import main as server_main
+        server_main()
+    else:
+        main()

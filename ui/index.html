@@ -4,52 +4,52 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
+<meta name="quanta-session-token" content="__QUANTA_SESSION_TOKEN__">
 <title>Кванта</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='26' fill='%230b0d12' stroke='%2322d3ee' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='10' fill='%237c5cff'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='4' y='4' width='56' height='56' rx='15' fill='%2323221f'/%3E%3Cpath d='M40 20a16 16 0 1 0 4 20l-8-6' fill='none' stroke='%23d1a36b' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/ui/style.css">
 </head>
 <body data-mode="standard">
 <div class="boot" id="boot">
-  <div class="boot-noise"></div>
-  <div class="boot-core">
-    <span class="ring r1"></span><span class="ring r2"></span><span class="ring r3"></span>
-    <span class="core"></span>
-  </div>
+  <div class="boot-mark" aria-hidden="true">Q</div>
   <div class="boot-title">Кванта</div>
-  <div class="boot-sub">ЦИФРОВОЙ НАПАРНИК</div>
+  <div class="boot-sub">Разговоры и дела</div>
   <div class="boot-log" id="bootLog">Подключаюсь…</div>
-  <div class="boot-bar"><i id="bootBar"></i></div>
+  <progress class="boot-bar" id="bootBar" max="100" value="0" aria-label="Запуск Кванты"></progress>
   <div class="boot-skip" id="bootSkip">нажми, чтобы пропустить</div>
 </div>
 
 <div class="app" id="app">
   <aside class="sidebar" id="sidebar">
     <div class="brand">
-      <div class="brand-mark"><span></span></div>
-      <div class="brand-text"><b>Кванта</b><small>пространство для диалога</small></div>
+      <div class="brand-mark" aria-hidden="true"><span>Q</span></div>
+      <div class="brand-text"><b>Кванта</b><small>разговоры и дела</small></div>
     </div>
-    <button class="new-chat" id="newChatBtn"><span>+</span> Новый чат</button>
-    <div class="side-label">НЕДАВНИЕ ДИАЛОГИ</div>
+    <button class="new-chat" id="newChatBtn"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span> Новый чат</button>
+    <div class="side-label">Недавние</div>
     <div class="chat-list" id="chatList"></div>
     <div class="side-spacer"></div>
     <div class="side-actions">
-      <button data-open="memory"><span class="ico">✦</span><span>Память</span></button>
-      <button data-open="projects"><span class="ico">▣</span><span>Проекты</span></button>
-      <button data-open="notes"><span class="ico">◫</span><span>Заметки</span></button>
-      <button data-open="reminders"><span class="ico">◷</span><span>Напоминания</span></button>
-      <button data-open="workflows"><span class="ico">⌘</span><span>Сценарии</span></button>
-      <button data-open="actions"><span class="ico">↶</span><span>История действий</span></button>
-      <button data-open="diagnostics"><span class="ico">◉</span><span>Диагностика</span></button>
-      <button data-open="analytics"><span class="ico">◔</span><span>Статистика</span></button>
-      <button data-open="settings"><span class="ico">⚙</span><span>Настройки</span></button>
+      <button data-open="computer"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></span><span>Компьютер</span></button>
+      <button data-open="minecraft"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4.5 7.8 7.5 4.4 7.5-4.4M12 12.2V21"/></svg></span><span>Minecraft-серверы</span></button>
+      <button data-open="memory"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 4.5A2.5 2.5 0 0 1 8.5 2H20v17H8.5A2.5 2.5 0 0 0 6 21.5v-17Z"/><path d="M6 5H4v17h12"/></svg></span><span>Память</span></button>
+      <button data-open="projects"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5h6l2 2H20v10H4z"/><path d="M4 7V5h6l2 2"/></svg></span><span>Проекты</span></button>
+      <button data-open="tasks"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><path d="m3.5 6 .8.8L6 5M3.5 12l.8.8L6 11M3.5 18l.8.8L6 17"/></svg></span><span>Задачи</span></button>
+      <button data-open="notes"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h8l4 4v14H7z"/><path d="M15 3v5h5M10 13h6M10 17h6"/></svg></span><span>Заметки</span></button>
+      <button data-open="reminders"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M8 14h3"/></svg></span><span>Напоминания</span></button>
+      <button data-open="workflows"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="M8 6h4a4 4 0 0 1 4 4v6M6 8v10h10"/></svg></span><span>Сценарии</span></button>
+      <button data-open="actions"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5"/><path d="M4 4v4.5h4.5M12 7v5l3 2"/></svg></span><span>История действий</span></button>
+      <button data-open="diagnostics"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></svg></span><span>Диагностика</span></button>
+      <button data-open="analytics"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></span><span>Статистика</span></button>
+      <button data-open="settings"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></span><span>Настройки</span></button>
     </div>
   </aside>
 
   <main class="main">
     <header class="topbar">
       <div class="top-left">
-        <button class="icon-btn only-mobile" id="sidebarToggle" title="Меню">☰</button>
-        <div class="mini-orb only-mini" id="miniOrb"><i></i><i></i><i></i></div>
+        <button class="icon-btn only-mobile" id="sidebarToggle" title="Меню" aria-label="Открыть меню"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+        <div class="mini-orb only-mini" id="miniOrb" aria-hidden="true">Q</div>
         <div class="chat-title" id="chatTitle">Новый чат</div>
         <span class="mode-chip" id="modeChip">Умный</span>
       </div>
@@ -65,15 +65,15 @@
           <option value="auto">Авто</option>
         </select>
         <button class="tone-toggle" id="seriousModeBtn" type="button" aria-pressed="false" title="Включить серьёзный режим">
-          <span aria-hidden="true">◐</span><span>Серьёзный</span>
+          <span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20.5 14A8.5 8.5 0 0 1 10 3.5 8.5 8.5 0 1 0 20.5 14Z"/></svg></span><span>Серьёзный</span>
         </button>
         <div class="view-switch" role="group" aria-label="Режим интерфейса">
-          <button data-view="hud" title="Полное рабочее пространство">◈</button>
-          <button data-view="standard" title="Обычное окно">▣</button>
-          <button data-view="mini" title="Компактное окно">●</button>
+          <button data-view="hud" title="Полное рабочее пространство" aria-label="Полное рабочее пространство"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16M8 9h13"/></svg></button>
+          <button data-view="standard" title="Обычное окно" aria-label="Обычное окно"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></button>
+          <button data-view="mini" title="Компактное окно" aria-label="Компактное окно"><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 7h6"/></svg></button>
         </div>
-        <button class="icon-btn only-mini" id="expandBtn" title="Развернуть HUD">⤢</button>
-        <button class="icon-btn" id="settingsBtn" title="Настройки">⚙</button>
+        <button class="icon-btn only-mini" id="expandBtn" title="Развернуть HUD" aria-label="Развернуть"><svg viewBox="0 0 24 24"><path d="M8 4H4v4M16 4h4v4M4 16v4h4M20 16v4h-4"/></svg></button>
+        <button class="icon-btn" id="settingsBtn" title="Настройки" aria-label="Настройки"><svg viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>
       </div>
     </header>
 
@@ -81,55 +81,44 @@
       <section class="chat-panel">
         <div class="chat-scroll" id="chatScroll">
           <div class="welcome" id="welcome">
-            <div class="welcome-orb">
-              <span class="w-ring w1"></span><span class="w-ring w2"></span><span class="w-ring w3"></span>
-              <span class="w-core">Q</span>
-            </div>
-            <h1>Кванта на связи</h1>
-            <p>Можно обсудить задачу, разобрать идею или просто поговорить.</p>
+            <div class="welcome-kicker"><span class="presence-indicator"></span> Кванта · на связи</div>
+            <h1>Ну, что разберём?</h1>
+            <p>Идея, вопрос, задача или просто разговор — начнём с любого.</p>
             <div class="suggestions">
               <button data-prompt="Помоги разложить эту идею на понятные шаги.">Разобрать идею</button>
               <button data-prompt="Объясни сложную тему простыми словами и на примере.">Объяснить тему</button>
               <button data-prompt="Помоги написать короткий, живой текст на эту тему.">Написать текст</button>
               <button data-prompt="Давай просто поговорим. Задай интересный вопрос.">Поговорить</button>
             </div>
-            <div class="welcome-note">Кванта помогает с вопросами, идеями и повседневными задачами. Действия с файлами и приложениями остаются под контролем пользователя.</div>
+            <div class="welcome-note">Если понадобится действие на компьютере, сначала покажу, что собираюсь сделать.</div>
           </div>
           <div class="messages" id="messages"></div>
         </div>
         <div class="composer-wrap">
           <div class="composer" id="composer">
-            <button class="mic" id="micBtn" title="Голосовой ввод">◉</button>
+            <button class="mic" id="micBtn" title="Голосовой ввод" aria-label="Голосовой ввод"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg></button>
             <textarea id="input" rows="1" placeholder="Напиши Кванте…" autocomplete="off"></textarea>
-            <button class="send-btn" id="sendBtn" title="Отправить">➤</button>
-            <button class="stop-btn hidden" id="stopBtn" title="Остановить">■</button>
+            <button class="send-btn" id="sendBtn" title="Отправить" aria-label="Отправить"><svg viewBox="0 0 24 24"><path d="m4 4 16 8-16 8 3-8-3-8Z"/><path d="M7 12h13"/></svg></button>
+            <button class="stop-btn hidden" id="stopBtn" title="Остановить" aria-label="Остановить"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
           </div>
           <div class="composer-hint"><span>Enter — отправить · Shift+Enter — новая строка</span><span id="hintRight"></span></div>
         </div>
       </section>
 
       <aside class="telemetry" id="telemetry" aria-label="Состояние Кванты">
-        <div class="orb-wrap">
-          <canvas id="orbCanvas" width="300" height="300" aria-hidden="true"></canvas>
-          <div class="orb-caption" id="orbCaption">НА СВЯЗИ</div>
-        </div>
         <div class="presence-state" id="presenceCard" aria-live="polite">
-          <span class="presence-indicator"></span>
+          <div class="presence-monogram" aria-hidden="true">Q<span class="presence-indicator"></span></div>
           <div><strong id="presenceState">Свободна</strong><span id="presenceDetail">На связи и готова к разговору</span></div>
         </div>
         <section class="presence-section">
-          <div class="presence-heading">СЕЙЧАС</div>
+          <div class="presence-heading">Сейчас</div>
           <div class="presence-activity" id="presenceActivity">Можно начать новый разговор или продолжить текущий.</div>
         </section>
         <section class="presence-section">
-          <div class="presence-heading">БЫСТРЫЕ СЦЕНАРИИ</div>
+          <div class="presence-heading">Быстрые сценарии</div>
           <div class="protocols" id="workflowQuickActions"></div>
           <button class="presence-link" data-open="workflows" type="button">Все сценарии <span>→</span></button>
         </section>
-        <div class="presence-local">
-          <span class="presence-local-mark">✦</span>
-          <div><strong>Контроль остаётся у пользователя</strong><small>История и настройки хранятся на устройстве</small></div>
-        </div>
         <div class="side-footer presence-connection">
           <span class="dot" id="statusDot"></span>
           <span id="statusText">проверка соединения…</span>
@@ -137,7 +126,7 @@
         <div class="telemetry-legacy hidden" aria-hidden="true">
           <div class="clock"><div class="clock-time" id="clockTime">--:--</div><div class="clock-date" id="clockDate">—</div></div>
           <div class="weather-card" id="weatherCard"><div class="weather-top"><span id="weatherCity">—</span><span id="weatherIcon">◌</span></div><div class="weather-temp" id="weatherTemp">—</div><div class="weather-desc" id="weatherDesc">—</div><div class="weather-range" id="weatherRange"></div></div>
-          <div class="meter-row"><span>CPU</span><div class="meter"><i id="cpuBar"></i></div><b id="cpuVal">0%</b></div><div class="meter-row"><span>RAM</span><div class="meter"><i id="ramBar"></i></div><b id="ramVal">0%</b></div><div class="meter-row"><span>DISK</span><div class="meter"><i id="diskBar"></i></div><b id="diskVal">0%</b></div>
+          <div class="meter-row"><span>CPU</span><progress class="meter" id="cpuBar" max="100" value="0" aria-label="CPU"></progress><b id="cpuVal">0%</b></div><div class="meter-row"><span>RAM</span><progress class="meter" id="ramBar" max="100" value="0" aria-label="RAM"></progress><b id="ramVal">0%</b></div><div class="meter-row"><span>DISK</span><progress class="meter" id="diskBar" max="100" value="0" aria-label="DISK"></progress><b id="diskVal">0%</b></div>
           <div id="batteryVal"></div><div id="uptimeVal"></div><div id="activeApp"></div><div id="activeTitle"></div>
           <span id="version">0.1</span><span id="dataDir">data</span>
         </div>
@@ -147,7 +136,7 @@
 </div>
 
 <div class="drawer hidden" id="drawer">
-  <div class="drawer-head"><h2 id="drawerTitle">Заметки</h2><button class="icon-btn" id="drawerClose">×</button></div>
+  <div class="drawer-head"><h2 id="drawerTitle">Заметки</h2><button class="icon-btn" id="drawerClose" aria-label="Закрыть">×</button></div>
   <div class="drawer-body" id="drawerBody"></div>
 </div>
 <div class="modal-root" id="modalRoot"></div>
