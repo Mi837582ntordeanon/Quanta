@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import importlib.util
 import json
 import os
@@ -54,6 +55,9 @@ DEFAULT_VOXCPM_INSTRUCT = (
 SILERO_SPEAKERS = ("baya", "kseniya", "xenia")
 DEFAULT_SILERO_SPEAKER = "baya"
 SILERO_MODEL_URL = "https://models.silero.ai/models/tts/ru/v4_ru.pt"
+# SHA-256 of the v4_ru.pt artifact served by SILERO_MODEL_URL.
+SILERO_MODEL_SHA256 = "896ab96347d5bd781ab97959d4fd6885620e5aab52405d3445626eb7c1414b00"
+SILERO_MODEL_MIN_BYTES = 1_000_000
 SILERO_SAMPLE_RATE = 48000
 
 # Female CustomVoice speakers. 0.6b ignores tone instructions entirely, so a
@@ -112,17 +116,26 @@ def _silero_model_path() -> Path:
 
 def _ensure_silero_model() -> Path:
     path = _silero_model_path()
-    if path.exists() and path.stat().st_size > 1_000_000:
-        return path
+    if path.is_file() and path.stat().st_size > SILERO_MODEL_MIN_BYTES:
+        digest = hashlib.sha256()
+        with path.open("rb") as cached:
+            for chunk in iter(lambda: cached.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() == SILERO_MODEL_SHA256:
+            return path
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".part")
-    import shutil
 
     try:
-        with urllib.request.urlopen(SILERO_MODEL_URL, timeout=180) as src, open(tmp, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-        if tmp.stat().st_size < 1_000_000:
+        digest = hashlib.sha256()
+        with urllib.request.urlopen(SILERO_MODEL_URL, timeout=180) as src, tmp.open("wb") as dst:
+            for chunk in iter(lambda: src.read(1024 * 1024), b""):
+                dst.write(chunk)
+                digest.update(chunk)
+        if tmp.stat().st_size < SILERO_MODEL_MIN_BYTES:
             raise RuntimeError("Silero: скачанный файл модели слишком мал")
+        if digest.hexdigest() != SILERO_MODEL_SHA256:
+            raise RuntimeError("Silero: SHA-256 скачанной модели не совпадает с ожидаемым")
         os.replace(tmp, path)
     except Exception:
         try:
