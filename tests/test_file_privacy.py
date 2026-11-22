@@ -27,6 +27,9 @@ class SensitiveFileTests(unittest.TestCase):
             toolbox = Toolbox(store)
             sensitive = (
                 ".env", ".env.production", ".ssh/id_ed25519",
+                ".npmrc", ".pypirc", ".git-credentials", ".netrc", ".docker/config.json",
+                "certificates/CLIENT.PEM", "certificates/client.PFX", "passwords/vault.kdbx",
+                "NTUSER.DAT",
                 "Browser/Google/Chrome/User Data/Default/Login Data",
                 "Browser/Mozilla/Firefox/Profiles/profile/cookies.sqlite",
                 "data/settings.json", "data/api_secrets.json", "data/chats/abcdef0123456789.json",
