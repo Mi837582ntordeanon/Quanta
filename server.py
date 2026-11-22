@@ -33,6 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from assistant.agent import Agent  # noqa: E402
+from assistant.server_routes.context import RouteContext  # noqa: E402
 from assistant import llm  # noqa: E402
 from assistant import voice  # noqa: E402
 from assistant import command_sandbox  # noqa: E402
@@ -470,6 +471,41 @@ def idle_loop(server: ThreadingHTTPServer) -> None:
 
 
 # ---------------------------------------------------------------------- handler
+def _route_context() -> RouteContext:
+    return RouteContext(
+        active=ACTIVE,
+        active_lock=ACTIVE_LOCK,
+        data_dir=DATA_DIR,
+        hotkey=HOTKEY,
+        media_dir=MEDIA_DIR,
+        minecraft=MINECRAFT,
+        minecraft_companion=MINECRAFT_COMPANION,
+        pending=PENDING,
+        pending_lock=PENDING_LOCK,
+        port=PORT,
+        resource_lock=RESOURCE_LOCK,
+        resource_operation_lock=RESOURCE_OPERATION_LOCK,
+        resource_state=RESOURCE_STATE,
+        server=SERVER,
+        stop=STOP,
+        store=STORE,
+        toolbox=TOOLBOX,
+        ui_dir=UI_DIR,
+        version=VERSION,
+        vision=VISION,
+        show_path_in_explorer=_show_path_in_explorer,
+        command_sandbox=command_sandbox,
+        deny_pending_for_chat=deny_pending_for_chat,
+        health_info=health_info,
+        llm=llm,
+        open_app_window=open_app_window,
+        request_resource_profile=request_resource_profile,
+        system_stats=system_stats,
+        voice=voice,
+        log=log,
+    )
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "Quanta/" + VERSION
     sys_version = ""
@@ -511,20 +547,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": False, "error": message}, status)
 
     def _read_json(self) -> dict[str, Any]:
-        try:
-            length = int(self.headers.get("Content-Length", "0") or "0")
-        except ValueError:
-            raise ValueError("Некорректный Content-Length")
-        if length > 25_000_000:
-            raise ValueError("Слишком большой запрос")
-        raw = self.rfile.read(length) if length else b"{}"
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise ValueError("Некорректный JSON") from exc
-        if not isinstance(data, dict):
-            raise ValueError("Ожидался JSON-объект")
-        return data
+        from assistant.server_routes.validation import read_json_object
+        return read_json_object(self.headers, self.rfile)
 
     def _check_host(self) -> bool:
         raw_host = (self.headers.get("Host") or "").strip()
@@ -609,165 +633,8 @@ class Handler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         if not self._authorize_api(path):
             return
-        try:
-            if path in ("/", "/index.html"):
-                self._serve_index()
-                return
-            if path.startswith("/ui/"):
-                rel = path[len("/ui/"):]
-                target = (UI_DIR / rel).resolve()
-                if not str(target).startswith(str(UI_DIR.resolve()) + os.sep):
-                    self._error(403, "Запрещено")
-                    return
-                self._serve_file(target)
-                return
-            if path.startswith("/media/"):
-                rel = path[len("/media/"):]
-                target = (MEDIA_DIR / rel).resolve()
-                if not str(target).startswith(str(MEDIA_DIR.resolve()) + os.sep):
-                    self._error(403, "Запрещено")
-                    return
-                self._serve_file(target)
-                return
-            if path == "/api/bootstrap":
-                settings = STORE.public_settings()
-                self._json({
-                    "ok": True,
-                    "version": VERSION,
-                    "settings": settings,
-                    "chats": STORE.list_chats(),
-                    "notes": STORE.list_notes(),
-                    "reminders": STORE.list_reminders(),
-                    "health": health_info(),
-                    "system": system_stats(),
-                    "command_sandbox": command_sandbox.status(),
-                    "server_time": datetime.now().isoformat(),
-                    "data_dir": str(DATA_DIR),
-                })
-                return
-            if path == "/api/health":
-                self._json({"ok": True, "health": health_info(), "system": system_stats(), "data_dir": str(DATA_DIR)})
-                return
-            if path == "/api/system":
-                self._json({"ok": True, **system_stats()})
-                return
-            if path == "/api/weather":
-                city = (query.get("city") or [""])[0]
-                info = TOOLBOX.weather_info(city)
-                self._json(info)
-                return
-            if path == "/api/models":
-                try:
-                    models = llm.list_models(STORE.settings)
-                except llm.LLMError as exc:
-                    self._error(400, str(exc))
-                    return
-                self._json({"ok": True, "models": models, "current": STORE.settings.get("model")})
-                return
-            if path == "/api/voice/status":
-                self._json({"ok": True, "voice": voice.voice_status(STORE)})
-                return
-            if path == "/api/vision/status":
-                self._json({"ok": True, **VISION.status()})
-                return
-            if path == "/api/desktop/apps":
-                from assistant import desktop
-                items = desktop.list_applications((query.get("query") or [""])[0], 120)
-                self._json({"ok": True, "applications": items})
-                return
-            if path == "/api/desktop/windows":
-                from assistant import desktop
-                items = desktop.list_windows((query.get("query") or [""])[0], 100)
-                self._json({"ok": True, "windows": items})
-                return
-            if path == "/api/desktop/tree":
-                from assistant import automation
-                hwnd = int((query.get("hwnd") or ["0"])[0] or 0)
-                result = automation.control_tree(hwnd, max_depth=5, limit=180)
-                self._json({"ok": True, **result})
-                return
-            if path == "/api/minecraft/versions":
-                self._json({"ok": True, **MINECRAFT.versions(limit=80)})
-                return
-            if path == "/api/minecraft/servers":
-                java = MINECRAFT.java_info()
-                java.pop("path", None)
-                self._json({"ok": True, "servers": MINECRAFT.list_servers(), "java": java})
-                return
-            if path == "/api/minecraft/companion":
-                self._json({"ok": True, "bots": MINECRAFT_COMPANION.list_status()})
-                return
-            if path.startswith("/api/minecraft/servers/") and path.endswith("/logs"):
-                server_id = path.split("/")[4]
-                self._json({"ok": True, "logs": MINECRAFT.logs(server_id, limit=160)})
-                return
-            if path == "/api/memory":
-                query_text = (query.get("query") or [""])[0]
-                self._json({"ok": True, "memory": STORE.list_memory(query_text)})
-                return
-            if path == "/api/memory/semantic":
-                self._json({"ok": True, **STORE.semantic_memory.status()})
-                return
-            if path == "/api/workflows":
-                self._json({"ok": True, "workflows": STORE.list_workflows()})
-                return
-            if path == "/api/projects":
-                include_archived = (query.get("all") or ["0"])[0] in ("1", "true", "yes")
-                project_query = (query.get("query") or [""])[0]
-                self._json({"ok": True, "projects": STORE.list_projects(
-                    include_archived=include_archived, query=project_query,
-                )})
-                return
-            if path == "/api/tasks":
-                task_status = (query.get("status") or [""])[0]
-                task_chat_id = (query.get("chat_id") or [""])[0]
-                self._json({"ok": True, "tasks": STORE.list_tasks(chat_id=task_chat_id, status=task_status)})
-                return
-            if path.startswith("/api/tasks/"):
-                self._json({"ok": True, "task": STORE.get_task(path.split("/")[3])})
-                return
-            if path == "/api/actions":
-                self._json({"ok": True, "actions": STORE.list_actions()})
-                return
-            if path == "/api/chats":
-                self._json({"ok": True, "chats": STORE.list_chats()})
-                return
-            if path.startswith("/api/chats/"):
-                chat_id = path.split("/")[3]
-                try:
-                    chat = STORE.get_chat(chat_id)
-                except (FileNotFoundError, ValueError) as exc:
-                    self._error(404, str(exc))
-                    return
-                self._json({"ok": True, "chat": chat})
-                return
-            if path == "/api/notes":
-                q = (query.get("query") or [""])[0]
-                self._json({"ok": True, "notes": STORE.list_notes(q)})
-                return
-            if path == "/api/reminders":
-                include_done = (query.get("all") or ["0"])[0] in ("1", "true", "yes")
-                self._json({"ok": True, "reminders": STORE.list_reminders(include_done)})
-                return
-            if path == "/api/events":
-                self._json({"ok": True, "events": STORE.drain_events()})
-                return
-            if path == "/api/window":
-                view = (query.get("view") or ["hud"])[0]
-                width, height = (480, 720) if view == "mini" else (1360, 900)
-                ok = open_app_window(f"http://127.0.0.1:{PORT}/?view={view}", width, height)
-                self._json({"ok": ok})
-                return
-            self._error(404, "Не найдено")
-        except FileNotFoundError as exc:
-            self._error(404, str(exc))
-        except ValueError as exc:
-            self._error(400, str(exc))
-        except RuntimeError as exc:
-            self._error(503, str(exc))
-        except Exception:
-            log("GET error: " + traceback.format_exc())
-            self._error(500, "Внутренняя ошибка сервера")
+        from assistant.server_routes.get import dispatch_get
+        dispatch_get(_route_context(), self, path, query, parsed)
 
     # ---------------------------------------------------------------------- POST
     def do_POST(self) -> None:
@@ -778,328 +645,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.unquote(parsed.path)
         if not self._authorize_api(path):
             return
-        try:
-            if path == "/api/chat":
-                self._handle_chat()
-                return
-            if path == "/api/resource-profile":
-                data = self._read_json()
-                _settings, status, error = request_resource_profile(str(data.get("profile") or ""))
-                if error:
-                    self._error(status or 400, error)
-                    return
-                with RESOURCE_LOCK:
-                    transition = dict(RESOURCE_STATE)
-                self._json({"ok": True, "settings": STORE.public_settings(), "transition": transition})
-                return
-            if path == "/api/voice/tts":
-                data = self._read_json()
-                text = str(data.get("text") or "").strip()
-                if not text:
-                    self._error(400, "Пустой текст для синтеза речи")
-                    return
-                with RESOURCE_OPERATION_LOCK:
-                    with RESOURCE_LOCK:
-                        switching = RESOURCE_STATE.get("status") == "switching"
-                    if switching:
-                        self._error(409, "Подожди завершения переключения профиля ресурсов")
-                        return
-                    info = voice.speak(text, STORE)
-                if not info.get("ok"):
-                    self._error(500, str(info.get("error") or "Синтез речи недоступен"))
-                    return
-                self._json({"ok": True, **info})
-                return
-            if path == "/api/voice/transcribe":
-                length_header = self.headers.get("Content-Length")
-                try:
-                    length = max(0, int(length_header or "0"))
-                except ValueError:
-                    self._error(400, "Неверный Content-Length")
-                    return
-                audio = self.rfile.read(length) if length else b""
-                if not audio:
-                    self._error(400, "Пустой аудиофайл")
-                    return
-                with RESOURCE_OPERATION_LOCK:
-                    with RESOURCE_LOCK:
-                        switching = RESOURCE_STATE.get("status") == "switching"
-                    if switching:
-                        self._error(409, "Подожди завершения переключения профиля ресурсов")
-                        return
-                    info = voice.transcribe(audio, "recording.webm", STORE)
-                if not info.get("ok"):
-                    self._error(500, str(info.get("error") or "Распознавание речи недоступно"))
-                    return
-                self._json({"ok": True, **info})
-                return
-            if path == "/api/vision/pull":
-                data = self._read_json()
-                model = str(data.get("model") or "qwen3-vl:2b")
-                STORE.save_settings({"vision_model": model})
-                self._json(VISION.pull(model))
-                return
-            if path == "/api/desktop/apps/open":
-                from assistant import desktop
-                data = self._read_json()
-                self._json(desktop.launch_application(str(data.get("name") or "")))
-                return
-            if path in ("/api/desktop/windows/focus", "/api/desktop/windows/close"):
-                from assistant import desktop
-                data = self._read_json()
-                action = desktop.focus_application if path.endswith("/focus") else desktop.close_application
-                self._json(action(str(data.get("name") or "")))
-                return
-            if path == "/api/desktop/music":
-                from assistant import desktop
-                data = self._read_json()
-                self._json(desktop.music_control(str(data.get("action") or ""), str(data.get("query") or "")))
-                return
-            if path == "/api/desktop/tree/action":
-                from assistant import automation
-                data = self._read_json()
-                result = automation.perform_action(
-                    int(data.get("hwnd") or 0), data.get("path") or [], str(data.get("action") or ""),
-                    expected_name=str(data.get("expected_name") or ""),
-                    expected_type=str(data.get("expected_type") or ""),
-                    expected_automation_id=str(data.get("expected_automation_id") or ""),
-                    value=str(data.get("value") or ""),
-                )
-                self._json(result)
-                return
-            if path == "/api/desktop/vision":
-                data = self._read_json()
-                result = TOOLBOX._pc_vision(str(data.get("prompt") or "Опиши, что видно на экране. Отвечай по-русски, коротко и по делу."))
-                self._json(result, 200 if result.get("ok") else 503)
-                return
-            if path == "/api/minecraft/servers":
-                data = self._read_json()
-                item = MINECRAFT.create_server(
-                    name=str(data.get("name") or ""), version=str(data.get("version") or ""),
-                    eula_accepted=data.get("eula_accepted") is True,
-                    port=data.get("port", 25565), memory_mb=data.get("memory_mb", 2048),
-                    max_players=data.get("max_players", 10), lan_access=data.get("lan_access") is True,
-                )
-                self._json({"ok": True, "server": item}, 202)
-                return
-            if path.startswith("/api/minecraft/companion/"):
-                parts = path.split("/")
-                if len(parts) < 6:
-                    self._error(404, "Неизвестное действие Minecraft-компаньона")
-                    return
-                server_id, action = parts[4], parts[5]
-                if action == "start":
-                    data = self._read_json()
-                    self._json({"ok": True, "bot": MINECRAFT_COMPANION.start(
-                        server_id, str(data.get("username") or "Quanta"))}, 202)
-                    return
-                if action == "stop":
-                    self._json({"ok": True, "bot": MINECRAFT_COMPANION.stop(server_id)})
-                    return
-                if action == "chat":
-                    data = self._read_json()
-                    self._json({"ok": True, "bot": MINECRAFT_COMPANION.say(
-                        server_id, str(data.get("text") or ""))})
-                    return
-                self._error(404, "Неизвестное действие Minecraft-компаньона")
-                return
-            if path.startswith("/api/minecraft/servers/"):
-                parts = path.split("/")
-                if len(parts) < 6:
-                    self._error(404, "Неизвестное действие Minecraft-сервера")
-                    return
-                server_id, action = parts[4], parts[5]
-                if action == "start":
-                    self._json({"ok": True, "server": MINECRAFT.start(server_id)})
-                    return
-                if action == "stop":
-                    MINECRAFT_COMPANION.stop_for_server(server_id)
-                    self._json({"ok": True, "server": MINECRAFT.stop(server_id)})
-                    return
-                if action == "command":
-                    data = self._read_json()
-                    self._json(MINECRAFT.send_command(server_id, str(data.get("command") or "")))
-                    return
-                self._error(404, "Неизвестное действие Minecraft-сервера")
-                return
-            if path == "/api/confirm":
-                data = self._read_json()
-                confirm_id = str(data.get("id") or "")
-                allow = bool(data.get("allow"))
-                with PENDING_LOCK:
-                    info = PENDING.get(confirm_id)
-                if info:
-                    info["allow"] = allow
-                    if allow and isinstance(data.get("approval"), dict):
-                        approval = data.get("approval")
-                        info["approval"] = approval
-                    info["event"].set()
-                self._json({"ok": True})
-                return
-            if path == "/api/stop":
-                data = self._read_json()
-                chat_id = str(data.get("chat_id") or "")
-                with ACTIVE_LOCK:
-                    event = ACTIVE.get(chat_id)
-                if event:
-                    event.set()
-                deny_pending_for_chat(chat_id)
-                self._json({"ok": True})
-                return
-            if path == "/api/chats":
-                data = self._read_json()
-                chat = STORE.create_chat(str(data.get("title") or "Новый чат"))
-                self._json({"ok": True, "chat": chat})
-                return
-            if path.startswith("/api/chats/") and path.endswith("/rename"):
-                chat_id = path.split("/")[3]
-                data = self._read_json()
-                result = STORE.update_chat_title(chat_id, str(data.get("title") or "Новый чат"))
-                self._json({"ok": True, "chat": result})
-                return
-            if path == "/api/settings":
-                data = self._read_json()
-                if "resource_profile" in data and data["resource_profile"] != STORE.settings.get("resource_profile", "work"):
-                    self._error(400, "Переключай профиль ресурсов через селектор Работа / Игра")
-                    return
-                try:
-                    settings = STORE.save_settings(data)
-                    if HOTKEY:
-                        HOTKEY.set_enabled(bool(settings.get("global_hotkey_enabled", True)))
-                except ValueError as exc:
-                    self._error(400, str(exc))
-                    return
-                self._json({"ok": True, "settings": STORE.public_settings()})
-                return
-            if path == "/api/memory":
-                data = self._read_json()
-                item = STORE.create_memory(str(data.get("text") or ""))
-                self._json({"ok": True, "item": item})
-                return
-            if path == "/api/memory/semantic":
-                STORE.semantic_memory.start(STORE.list_memory())
-                self._json({"ok": True, **STORE.semantic_memory.status()})
-                return
-            if path == "/api/workflows":
-                data = self._read_json()
-                item = STORE.create_workflow(str(data.get("title") or ""), str(data.get("prompt") or ""))
-                self._json({"ok": True, "item": item})
-                return
-            if path == "/api/projects":
-                data = self._read_json()
-                try:
-                    chat_id = str(data.get("chat_id") or "").strip()
-                    if chat_id:
-                        # Validate the optional relationship before creating a card,
-                        # so a stale chat id cannot leave behind an orphan project.
-                        STORE.get_chat(chat_id)
-                    project = STORE.create_project(
-                        str(data.get("title") or ""),
-                        str(data.get("goal") or ""),
-                        next_step=str(data.get("next_step") or ""),
-                        summary=str(data.get("summary") or ""),
-                        decisions=data.get("decisions") or [],
-                        files=data.get("files") or [],
-                    )
-                    if chat_id:
-                        project = STORE.link_chat_to_project(project["id"], chat_id)
-                except (ValueError, FileNotFoundError) as exc:
-                    self._error(400 if isinstance(exc, ValueError) else 404, str(exc))
-                    return
-                self._json({"ok": True, "project": project})
-                return
-            if path.startswith("/api/projects/") and path.endswith("/link"):
-                project_id = path.split("/")[3]
-                data = self._read_json()
-                try:
-                    project = STORE.link_chat_to_project(project_id, str(data.get("chat_id") or ""))
-                except FileNotFoundError as exc:
-                    self._error(404, str(exc))
-                    return
-                except ValueError as exc:
-                    self._error(400, str(exc))
-                    return
-                self._json({"ok": True, "project": project})
-                return
-            if path.startswith("/api/projects/") and path.endswith("/unlink"):
-                project_id = path.split("/")[3]
-                data = self._read_json()
-                try:
-                    project = STORE.unlink_chat_from_project(project_id, str(data.get("chat_id") or ""))
-                except FileNotFoundError as exc:
-                    self._error(404, str(exc))
-                    return
-                self._json({"ok": True, "project": project})
-                return
-            if path.startswith("/api/projects/") and (path.endswith("/archive") or path.endswith("/restore")):
-                project_id = path.split("/")[3]
-                try:
-                    project = STORE.archive_project(project_id, archived=path.endswith("/archive"))
-                except FileNotFoundError as exc:
-                    self._error(404, str(exc))
-                    return
-                except ValueError as exc:
-                    self._error(400, str(exc))
-                    return
-                self._json({"ok": True, "project": project})
-                return
-            if path == "/api/actions/clear":
-                STORE.clear_actions()
-                self._json({"ok": True})
-                return
-            if path.startswith("/api/actions/") and path.endswith("/undo"):
-                action_id = path.split("/")[3]
-                self._json(TOOLBOX.undo_action(action_id))
-                return
-            if path == "/api/notes":
-                data = self._read_json()
-                note = STORE.create_note(str(data.get("title") or "Без названия"), str(data.get("text") or ""))
-                self._json({"ok": True, "note": note})
-                return
-            if path == "/api/reminders":
-                data = self._read_json()
-                try:
-                    due = TOOLBOX._parse_when(str(data.get("when") or ""))
-                except ValueError as exc:
-                    self._error(400, str(exc))
-                    return
-                reminder = STORE.create_reminder(str(data.get("text") or "Напоминание"), due)
-                self._json({"ok": True, "reminder": reminder})
-                return
-            if path.startswith("/api/reminders/") and path.endswith("/done"):
-                reminder_id = path.split("/")[3]
-                data = self._read_json()
-                reminder = STORE.set_reminder_done(reminder_id, bool(data.get("done", True)))
-                self._json({"ok": True, "reminder": reminder})
-                return
-            if path == "/api/open":
-                data = self._read_json()
-                # UI navigation only: never run a file from this endpoint.
-                result = _show_path_in_explorer(str(data.get("path") or ""))
-                self._json(result)
-                return
-            if path == "/api/reveal":
-                data = self._read_json()
-                target = Path(str(data.get("path") or "")).resolve()
-                if target.exists():
-                    subprocess.Popen(["explorer", "/select,", str(target)], close_fds=True)
-                self._json({"ok": target.exists()})
-                return
-            if path == "/api/shutdown":
-                self._json({"ok": True})
-                STOP.set()
-                threading.Thread(target=SERVER.shutdown, daemon=True).start()  # type: ignore[name-defined]
-                return
-            self._error(404, "Не найдено")
-        except ValueError as exc:
-            self._error(400, str(exc))
-        except FileNotFoundError as exc:
-            self._error(404, str(exc))
-        except (RuntimeError, OSError) as exc:
-            self._error(503, str(exc))
-        except Exception:
-            log("POST error: " + traceback.format_exc())
-            self._error(500, "Внутренняя ошибка сервера")
+        from assistant.server_routes.post import dispatch_post
+        dispatch_post(_route_context(), self, path)
 
     def _handle_chat(self) -> None:
         data = self._read_json()
@@ -1211,40 +758,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
         if not self._authorize_api(path):
             return
-        try:
-            if path.startswith("/api/chats/"):
-                chat_id = path.split("/")[3]
-                STORE.delete_chat(chat_id)
-                self._json({"ok": True})
-                return
-            if path.startswith("/api/notes/"):
-                note_id = path.split("/")[3]
-                self._json({"ok": STORE.delete_note(note_id)})
-                return
-            if path.startswith("/api/reminders/"):
-                reminder_id = path.split("/")[3]
-                self._json({"ok": STORE.delete_reminder(reminder_id)})
-                return
-            if path.startswith("/api/projects/"):
-                project_id = path.split("/")[3]
-                self._json({"ok": STORE.delete_project(project_id)})
-                return
-            if path.startswith("/api/memory/"):
-                memory_id = path.split("/")[3]
-                self._json({"ok": STORE.delete_memory(memory_id)})
-                return
-            if path.startswith("/api/workflows/"):
-                workflow_id = path.split("/")[3]
-                self._json({"ok": STORE.delete_workflow(workflow_id)})
-                return
-            if path == "/api/actions":
-                STORE.clear_actions()
-                self._json({"ok": True})
-                return
-            self._error(404, "Не найдено")
-        except Exception:
-            log("DELETE error: " + traceback.format_exc())
-            self._error(500, "Внутренняя ошибка сервера")
+        from assistant.server_routes.delete import dispatch_delete
+        dispatch_delete(_route_context(), self, path)
 
     def do_PUT(self) -> None:
         self._touch()
@@ -1253,29 +768,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
         if not self._authorize_api(path):
             return
-        try:
-            if path.startswith("/api/notes/"):
-                note_id = path.split("/")[3]
-                data = self._read_json()
-                note = STORE.update_note(note_id, title=data.get("title"), text=data.get("text"))
-                self._json({"ok": True, "note": note})
-                return
-            if path.startswith("/api/projects/"):
-                project_id = path.split("/")[3]
-                data = self._read_json()
-                allowed = {"title", "goal", "status", "next_step", "summary", "decisions", "files"}
-                changes = {key: data[key] for key in allowed if key in data}
-                project = STORE.update_project(project_id, **changes)
-                self._json({"ok": True, "project": project})
-                return
-            self._error(404, "Не найдено")
-        except FileNotFoundError as exc:
-            self._error(404, str(exc))
-        except ValueError as exc:
-            self._error(400, str(exc))
-        except Exception:
-            log("PUT error: " + traceback.format_exc())
-            self._error(500, "Внутренняя ошибка сервера")
+        from assistant.server_routes.put import dispatch_put
+        dispatch_put(_route_context(), self, path)
 
 
 SERVER: ThreadingHTTPServer | None = None
