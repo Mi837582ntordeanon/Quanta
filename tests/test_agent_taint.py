@@ -8,8 +8,8 @@ from urllib.parse import quote_plus
 from unittest.mock import patch
 
 from assistant import storage
-from assistant.agent import Agent, _NETWORK_TAINT_TOOLS, _READ_TAINT_TOOLS
-from assistant.tools import Toolbox
+from assistant.agent import Agent, _READ_TAINT_TOOLS
+from assistant.tools import Toolbox, tool
 
 
 class AgentTaintTests(unittest.TestCase):
@@ -100,9 +100,79 @@ class AgentTaintTests(unittest.TestCase):
             self.assertEqual(executed, ["web_search"])
             self.assertEqual(confirmation_calls, [])
 
-    def test_taint_catalogue_covers_file_clipboard_screen_and_uia_reads(self):
+    def test_taint_metadata_marks_local_reads_offline_and_external_tools_online(self):
         self.assertTrue({"read_file", "clipboard_get", "screenshot", "pc_vision", "pc_uia_tree"} <= _READ_TAINT_TOOLS)
-        self.assertTrue({"web_search", "fetch_url", "weather", "generate_image"} <= _NETWORK_TAINT_TOOLS)
+        with tempfile.TemporaryDirectory() as root:
+            store, _chat, _data_dir, _chats_dir = self.make_store(root)
+            toolbox = Toolbox(store)
+        self.assertFalse(toolbox.tools["read_file"]["network"])
+        self.assertTrue(toolbox.tools["web_search"]["network"])
+        self.assertTrue(toolbox.tools["fetch_url"]["network"])
+
+    def test_tool_without_network_opt_out_requires_confirm_after_read(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, chat, data_dir, chats_dir = self.make_store(root)
+            toolbox = Toolbox(store)
+
+            @tool(
+                name="custom_lookup", label="Проверка", risk="read",
+                capabilities=("читает_личное",),
+                description="Custom lookup used for the network default test.",
+                parameters={"type": "object", "properties": {}},
+            )
+            def custom_lookup():
+                return {"ok": True, "text": "Внешний результат"}
+
+            spec = custom_lookup.__tool_spec__
+            toolbox.add(
+                spec.name, spec.description, spec.parameters, custom_lookup,
+                label=spec.label, risk=spec.risk, confirm=spec.confirm,
+                capabilities=spec.capabilities, network=spec.network,
+            )
+            self.assertTrue(toolbox.tools["custom_lookup"]["network"])
+            agent = Agent(store, toolbox, lambda *_args: False)
+            replies = [
+                [{"id": "discover", "name": "tool_search", "arguments": {
+                    "names": ["read_file", "custom_lookup"],
+                }}],
+                [{"id": "read", "name": "read_file", "arguments": {"path": "local.txt"}}],
+                [{"id": "lookup", "name": "custom_lookup", "arguments": {}}],
+            ]
+            executed = []
+            confirmations = []
+            events = []
+
+            def fake_stream(_settings, _messages, _tools):
+                calls = replies.pop(0) if replies else []
+                yield {"type": "final", "message": {
+                    "role": "assistant", "content": "Готово.", "tool_calls": calls,
+                }}
+
+            def execute(name, args):
+                executed.append(name)
+                if name == "read_file":
+                    return {"ok": True, "text": "Прочитанный файл"}
+                return toolbox.tools[name]["func"](**args)
+
+            def confirm(_chat_id, _call_id, name, args, _emit, _stop):
+                confirmations.append((name, dict(args)))
+                return False
+
+            with patch.object(storage, "DATA_DIR", data_dir), \
+                 patch.object(storage, "CHATS_DIR", chats_dir), \
+                 patch("assistant.agent.mcp_client.CONFIG_PATH", data_dir / "mcp_servers.json"), \
+                 patch.object(toolbox, "execute", side_effect=execute), \
+                 patch("assistant.agent.llm.stream_chat", side_effect=fake_stream):
+                agent.confirm_fn = confirm
+                agent.run(chat["id"], "Прочитай файл и проверь данные", events.append, threading.Event())
+
+            self.assertEqual(executed, ["read_file"])
+            self.assertEqual([name for name, _args in confirmations], ["custom_lookup"])
+            lookup_event = next(
+                event for event in events
+                if event.get("type") == "tool_call" and event.get("name") == "custom_lookup"
+            )
+            self.assertTrue(lookup_event["confirm"])
 
 
 if __name__ == "__main__":

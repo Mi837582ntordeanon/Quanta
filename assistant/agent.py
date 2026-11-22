@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from . import command_sandbox, llm
 from . import mcp_client
+from .agent_events import AgentEvent
 from .storage import Store
 from .tools import Toolbox
 
@@ -20,23 +21,27 @@ WEEKDAYS = ["понедельник", "вторник", "среда", "четв�
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня",
           "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 
-Emit = Callable[[dict[str, Any]], None]
+Emit = Callable[[AgentEvent], None]
 ConfirmFn = Callable[[str, str, str, dict[str, Any], Emit, threading.Event], bool | dict[str, Any]]
 
 _READ_TAINT_TOOLS = {
     "read_file", "clipboard_get", "screenshot", "pc_vision", "pc_uia_tree",
 }
-_NETWORK_TAINT_TOOLS = {
-    "web_search", "fetch_url", "weather", "generate_image", "yandex_music", "minecraft_status",
-}
 
 
-def _is_network_tool(name: str, args: dict[str, Any], mcp_tool: dict[str, Any] | None) -> bool:
-    if mcp_tool or name in _NETWORK_TAINT_TOOLS:
+def _is_network_tool(
+    name: str,
+    args: dict[str, Any],
+    mcp_tool: dict[str, Any] | None,
+    toolbox: Toolbox,
+) -> bool:
+    if mcp_tool:
         return True
     if name == "open_path":
-        return str(args.get("path") or "").strip().lower().startswith(("http://", "https://"))
-    return False
+        if str(args.get("path") or "").strip().lower().startswith(("http://", "https://")):
+            return True
+    metadata = toolbox.tools.get(name, {})
+    return bool(metadata.get("network", True))
 
 
 def _network_confirmation_metadata(
@@ -621,18 +626,14 @@ class Agent:
         emit({"type": "done", "chat_id": chat_id, "title": chat.get("title"),
               "steps": 1, "message": final})
 
-    def run(
+    def _prepare_run_context(
         self,
         chat_id: str,
         user_text: str,
         emit: Emit,
-        stop_event: threading.Event,
-        tone_mode: str = "default",
-        task_id: str | None = None,
-    ) -> None:
+        task_id: str | None,
+    ) -> tuple[dict[str, Any], str | None, dict[str, Any]] | None:
         settings = self.store.settings
-        read_taint_sources: set[str] = set()
-        untrusted_sources: set[str] = set()
         chat = self.store.get_chat(chat_id)
         user_message = {"role": "user", "content": user_text, "ts": time.time()}
         self.store.append_message(chat_id, user_message)
@@ -646,11 +647,7 @@ class Agent:
             created_task = self.store.create_task(chat_id, user_text, status="running")
             task_id = str(created_task["id"])
 
-        max_steps = int(settings.get("max_steps", 8) or 8)
         mode = settings.get("access_mode", "smart")
-        # Keep the narrowly scoped Yandex Music command parser: it extracts a
-        # requested track name and dispatches one low-risk music action. All
-        # general-purpose tool discovery below is model-driven.
         recent_messages = (chat.get("messages") or [])[-7:-1]
         music_context = any(
             any(call.get("name") == "yandex_music" for call in (message.get("tool_calls") or []))
@@ -661,7 +658,364 @@ class Agent:
         if direct_music and self.toolbox.allowed(mode, "yandex_music"):
             self._run_direct_music(chat_id, direct_music, emit)
             self._complete_task(task_id, "Музыкальный запрос обработан.", step=1)
+            return None
+        return settings, task_id, chat
+
+    def _build_step_messages(
+        self,
+        chat_id: str,
+        user_text: str,
+        settings: dict[str, Any],
+        tone_mode: str,
+        chat: dict[str, Any],
+        mcp_warnings: list[str],
+    ) -> list[dict[str, Any]]:
+        system_prompt = build_system_prompt(
+            self.store,
+            settings,
+            tone_mode=tone_mode,
+            project=self.store.get_project_for_chat(chat_id),
+            memory_query=user_text,
+        )
+        system_prompt += (
+            "\n\nВЫБОР ИНСТРУМЕНТОВ: Сначала определи, нужен ли реальный доступ к данным или действие. "
+            "Если нужен, вызови tool_search и выбери подходящие имена из его каталога. "
+            "Затем вызови подключённые инструменты и опирайся на их результат. "
+            "Не заявляй, что проверила ПК, сайт или приложение, если инструмент этого не подтвердил. "
+            "Если нужного инструмента нет в каталоге, честно скажи об этом."
+            " Для многошаговой задачи сохрани вначале краткий план через task_plan; "
+            "перед продолжением план остановится для одобрения пользователем. Не пытайся заменить или скрыть его. "
+            "Записи файлов по умолчанию останутся выключены; запуск команд одобряется только точным полным текстом и рабочей папкой в выбранной пользователем границе. "
+            "после каждого фактического действия приложение автоматически сохраняет результат в checkpoint."
+        )
+        if mcp_warnings:
+            system_prompt += "\n\nЧасть MCP-серверов недоступна: " + "; ".join(mcp_warnings[:8])
+        history = _trim_messages(chat.get("messages") or [])
+        return [{"role": "system", "content": system_prompt}] + _to_api_messages(history)
+
+    def _stream_model_step(
+        self,
+        chat_id: str,
+        task_id: str | None,
+        runtime_settings: dict[str, Any],
+        api_messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
+        emit: Emit,
+        stop_event: threading.Event,
+        tool_results_for_run: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, str, bool]:
+        collected = ""
+        final: dict[str, Any] | None = None
+        try:
+            for event in llm.stream_chat(runtime_settings, api_messages, tool_schemas):
+                if stop_event.is_set():
+                    break
+                if event.get("type") == "delta":
+                    text = event.get("text") or ""
+                    collected += text
+                    # Buffer text after a failed tool so the UI cannot speak a false success.
+                    if not any(not item.get("ok") for item in tool_results_for_run):
+                        emit({"type": "delta", "text": text})
+                elif event.get("type") == "provider_fallback":
+                    emit(event)
+                elif event.get("type") == "final":
+                    final = event.get("message") or {}
+        except llm.LLMError as exc:
+            self._update_task(task_id, status="failed", checkpoint="Модель не ответила: " + str(exc)[:300],
+                              checkpoint_type="error", error=str(exc)[:800])
+            emit({"type": "error", "message": str(exc)})
+            return None, collected, True
+        except Exception as exc:  # noqa: BLE001
+            self._update_task(task_id, status="failed", checkpoint="Ошибка модели: " + str(exc)[:300],
+                              checkpoint_type="error", error=str(exc)[:800])
+            emit({"type": "error", "message": f"Неожиданная ошибка модели: {exc}"})
+            return None, collected, True
+
+        if stop_event.is_set():
+            if collected.strip():
+                partial = {"role": "assistant", "content": collected, "tool_calls": [], "ts": time.time(), "stopped": True}
+                self.store.append_message(chat_id, partial)
+                emit({"type": "step_end", "message": partial, "stopped": True})
+            self._update_task(task_id, status="interrupted", checkpoint="Выполнение остановлено пользователем.",
+                              checkpoint_type="interrupted")
+            emit({"type": "stopped"})
+            return final, collected, True
+        return final, collected, False
+
+    def _save_assistant_step(
+        self,
+        chat_id: str,
+        final: dict[str, Any] | None,
+        collected: str,
+        tool_results_for_run: list[dict[str, Any]],
+        emit: Emit,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        content = (final or {}).get("content")
+        if content is None:
+            content = collected
+        tool_calls = (final or {}).get("tool_calls") or []
+        if not tool_calls and any(not item.get("ok") for item in tool_results_for_run):
+            content = _tool_outcome_report(tool_results_for_run, self.toolbox)
+        assistant_message: dict[str, Any] = {
+            "role": "assistant",
+            "content": content or "",
+            "tool_calls": tool_calls,
+            "ts": time.time(),
+        }
+        self.store.append_message(chat_id, assistant_message)
+        emit({"type": "step_end", "message": assistant_message})
+        return assistant_message, tool_calls
+
+    def _confirm_tool_call(
+        self,
+        chat_id: str,
+        task_id: str | None,
+        call_id: str,
+        name: str,
+        args: dict[str, Any],
+        label: str,
+        settings: dict[str, Any],
+        read_taint_sources: set[str],
+        untrusted_sources: set[str],
+        mcp_tool: dict[str, Any] | None,
+        sensitive_read_path: Path | None,
+        tainted_network_call: bool,
+        tainted_memory_write: bool,
+        emit: Emit,
+        stop_event: threading.Event,
+    ) -> tuple[bool, str, int | None]:
+        self._update_task(task_id, status="waiting_confirmation",
+                          checkpoint=f"Ожидается подтверждение: {label}.",
+                          checkpoint_type="confirmation")
+        confirmation_args = args
+        image_seed: int | None = None
+        if tainted_network_call:
+            security_details, image_seed = _network_confirmation_metadata(
+                name, args, settings, read_taint_sources, self.toolbox, mcp_tool
+            )
+            confirmation_args = {**args, "_quanta_security_confirmation": security_details}
+        elif sensitive_read_path is not None:
+            confirmation_args = {
+                **args,
+                "_quanta_security_confirmation": {
+                    "warning": (
+                        "Этот путь может содержать API-ключи, пароли, cookies или другие "
+                        "личные данные. После подтверждения содержимое станет доступно модели."
+                    ),
+                    "destinations": [f"Локальный путь: {sensitive_read_path}"],
+                },
+            }
+        elif tainted_memory_write:
+            source_names = sorted(
+                self.toolbox.label(source) if source in self.toolbox.tools else source
+                for source in untrusted_sources
+            )
+            confirmation_args = {
+                **args,
+                "_quanta_security_confirmation": {
+                    "warning": (
+                        "Текст будет записан в память из недоверенных данных этого хода: "
+                        + ", ".join(source_names)
+                        + ". Проверь, что это именно факт для сохранения, а не инструкция со страницы или файла."
+                    ),
+                    "destinations": [],
+                },
+            }
+
+        decision = self.confirm_fn(
+            chat_id, call_id, name, confirmation_args, emit, stop_event
+        )
+        command_sandbox_root = ""
+        if isinstance(decision, dict):
+            approved = bool(decision.get("allow"))
+            if name == "run_command" and decision.get("sandbox"):
+                try:
+                    command_sandbox_root = str(
+                        decision.get("root") or self.toolbox._resolve(str(args.get("cwd") or "."))
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    command_sandbox_root = ""
+        else:
+            approved = bool(decision)
+        if approved:
+            self._update_task(task_id, status="running",
+                              checkpoint=f"Подтверждено пользователем: {label}.",
+                              checkpoint_type="confirmation")
+        return approved, command_sandbox_root, image_seed
+
+    def _process_tool_call(
+        self,
+        chat_id: str,
+        task_id: str | None,
+        step: int,
+        call_id: str,
+        name: str,
+        args: dict[str, Any],
+        mode: str,
+        settings: dict[str, Any],
+        mcp_by_name: dict[str, dict[str, Any]],
+        read_taint_sources: set[str],
+        untrusted_sources: set[str],
+        tool_results_for_run: list[dict[str, Any]],
+        emit: Emit,
+        stop_event: threading.Event,
+    ) -> tuple[bool, bool, str]:
+        approved = False
+        mcp_tool = mcp_by_name.get(name)
+        label = (f"MCP · {mcp_tool['server_name']} / {mcp_tool['tool_name']}"
+                 if mcp_tool else self.toolbox.label(name))
+        allowed = (mode != "safe") if mcp_tool else self.toolbox.allowed(mode, name)
+        sensitive_read_path: Path | None = None
+        if allowed and name == "read_file":
+            try:
+                sensitive_read_path = self.toolbox.sensitive_file_path(str(args.get("path") or ""))
+            except (OSError, RuntimeError, ValueError):
+                sensitive_read_path = None
+        task_approval: dict[str, Any] = {}
+        if task_id and hasattr(self.store, "get_task"):
+            try:
+                task_approval = self.store.get_task(task_id).get("approval") or {}
+            except (FileNotFoundError, ValueError):
+                task_approval = {}
+        approved_by_plan = (not mcp_tool and allowed and
+                            _approval_allows_tool(name, args, task_approval,
+                                                  str(settings.get("work_dir") or "")))
+        tainted_network_call = bool(read_taint_sources) and _is_network_tool(
+            name, args, mcp_tool, self.toolbox
+        )
+        tainted_memory_write = name == "memory_save" and bool(untrusted_sources)
+        need_confirm = True if mcp_tool and allowed else (
+            allowed and (self.toolbox.needs_confirm(mode, name) or tainted_network_call
+                         or sensitive_read_path is not None or tainted_memory_write)
+            and not approved_by_plan
+        )
+        emit({
+            "type": "tool_call",
+            "id": call_id,
+            "name": name,
+            "label": label,
+            "args": args,
+            "allowed": allowed,
+            "confirm": need_confirm,
+        })
+
+        result: dict[str, Any]
+        confirmation_image_seed: int | None = None
+        if not allowed:
+            result = {
+                "ok": False,
+                "text": ("Действие заблокировано безопасным режимом. "
+                         "Переключи режим доступа, если это действительно нужно."),
+            }
+        else:
+            approved = True
+            command_sandbox_root = ""
+            if need_confirm:
+                approved, command_sandbox_root, confirmation_image_seed = self._confirm_tool_call(
+                    chat_id, task_id, call_id, name, args, label, settings,
+                    read_taint_sources, untrusted_sources, mcp_tool, sensitive_read_path,
+                    tainted_network_call, tainted_memory_write, emit, stop_event,
+                )
+            if not approved:
+                result = {"ok": False, "text": "Пользователь отклонил выполнение действия."}
+            else:
+                execute_args = dict(args)
+                if name == "project_create":
+                    execute_args["_current_chat_id"] = chat_id
+                if name == "run_command":
+                    if approved_by_plan and task_approval.get("sandbox_commands"):
+                        command_sandbox_root = str(task_approval.get("root") or "")
+                    if command_sandbox_root:
+                        execute_args["_sandbox_root"] = command_sandbox_root
+                if name == "generate_image" and confirmation_image_seed is not None:
+                    execute_args["_quanta_seed"] = confirmation_image_seed
+                result = (mcp_client.call_tool(mcp_tool["server_name"], mcp_tool["tool_name"], execute_args)
+                          if mcp_tool else self.toolbox.execute(name, execute_args))
+
+        if result.get("ok") and not mcp_tool and name in _READ_TAINT_TOOLS:
+            read_taint_sources.add(name)
+            untrusted_sources.add(name)
+        if result.get("ok") and _is_network_tool(name, args, mcp_tool, self.toolbox):
+            untrusted_sources.add(name)
+        if result.get("ok") and mcp_tool:
+            untrusted_sources.add(
+                f"MCP · {mcp_tool.get('server_name') or 'сервер'} / "
+                f"{mcp_tool.get('tool_name') or 'инструмент'}"
+            )
+
+        tool_results_for_run.append({
+            "name": name,
+            "ok": bool(result.get("ok")),
+            "text": str(result.get("text") or ""),
+        })
+
+        if self.toolbox.risk(name) != "read":
+            summary = "Не выполнено" if not result.get("ok") else "Выполнено"
+            if result.get("ok") and name in ("write_file", "move_path", "copy_path", "delete_path", "open_path"):
+                raw_path = args.get("path") or args.get("dst") or args.get("src") or ""
+                basename = str(raw_path).replace("\\", "/").rstrip("/").split("/")[-1]
+                if basename:
+                    summary += ": " + basename[:80]
+            elif result.get("ok") and name.startswith("notes_"):
+                summary = "Изменение локальных заметок"
+            elif result.get("ok") and name.startswith("reminder_"):
+                summary = "Изменение локальных напоминаний"
+            elif result.get("ok") and name.startswith("memory_"):
+                summary = "Изменение локальной памяти"
+            elif result.get("ok") and name.startswith("project_"):
+                summary = "Изменение карточки проекта"
+            self.store.record_action({
+                "name": name,
+                "label": label,
+                "summary": summary,
+                "ok": bool(result.get("ok")),
+                "undo": result.get("_undo"),
+            })
+
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": name,
+            "content": result.get("text") or "",
+            "ok": bool(result.get("ok")),
+            "media": result.get("media") or [],
+            "ts": time.time(),
+        }
+        self.store.append_message(chat_id, tool_message)
+        self._update_task(
+            task_id,
+            status="running",
+            checkpoint=f"{label}: {str(result.get('text') or ('выполнено' if result.get('ok') else 'не выполнено'))[:500]}",
+            checkpoint_type="tool_result",
+            step=step + 1,
+        )
+        emit({
+            "type": "tool_result",
+            "id": call_id,
+            "name": name,
+            "ok": bool(result.get("ok")),
+            "text": result.get("text") or "",
+            "media": result.get("media") or [],
+        })
+        return need_confirm, approved, label
+
+    def run(
+        self,
+        chat_id: str,
+        user_text: str,
+        emit: Emit,
+        stop_event: threading.Event,
+        tone_mode: str = "default",
+        task_id: str | None = None,
+    ) -> None:
+        prepared = self._prepare_run_context(chat_id, user_text, emit, task_id)
+        if prepared is None:
             return
+        settings, task_id, chat = prepared
+        read_taint_sources: set[str] = set()
+        untrusted_sources: set[str] = set()
+        max_steps = int(settings.get("max_steps", 8) or 8)
+        mode = settings.get("access_mode", "smart")
         external_tools: list[dict[str, Any]] = []
         mcp_warnings: list[str] = []
         if mode != "safe" and mcp_client.CONFIG_PATH.is_file():
@@ -690,82 +1044,19 @@ class Agent:
                 return
 
             emit({"type": "step_start", "step": step})
-            system_prompt = build_system_prompt(
-                self.store,
-                settings,
-                tone_mode=tone_mode,
-                project=self.store.get_project_for_chat(chat_id),
-                memory_query=user_text,
+            api_messages = self._build_step_messages(
+                chat_id, user_text, settings, tone_mode, chat, mcp_warnings
             )
-            system_prompt += (
-            "\n\nВЫБОР ИНСТРУМЕНТОВ: Сначала определи, нужен ли реальный доступ к данным или действие. "
-                "Если нужен, вызови tool_search и выбери подходящие имена из его каталога. "
-                "Затем вызови подключённые инструменты и опирайся на их результат. "
-                "Не заявляй, что проверила ПК, сайт или приложение, если инструмент этого не подтвердил. "
-                "Если нужного инструмента нет в каталоге, честно скажи об этом."
-                " Для многошаговой задачи сохрани вначале краткий план через task_plan; "
-                "перед продолжением план остановится для одобрения пользователем. Не пытайся заменить или скрыть его. "
-                "Записи файлов по умолчанию останутся выключены; запуск команд одобряется только точным полным текстом и рабочей папкой в выбранной пользователем границе. "
-                "после каждого фактического действия приложение автоматически сохраняет результат в checkpoint."
+            final, collected, stopped = self._stream_model_step(
+                chat_id, task_id, runtime_settings, api_messages, tool_schemas,
+                emit, stop_event, tool_results_for_run,
             )
-            if mcp_warnings:
-                system_prompt += "\n\nЧасть MCP-серверов недоступна: " + "; ".join(mcp_warnings[:8])
-            history = _trim_messages(chat.get("messages") or [])
-            api_messages = [{"role": "system", "content": system_prompt}] + _to_api_messages(history)
-
-            collected = ""
-            final: dict[str, Any] | None = None
-            try:
-                for event in llm.stream_chat(runtime_settings, api_messages, tool_schemas):
-                    if stop_event.is_set():
-                        break
-                    if event.get("type") == "delta":
-                        text = event.get("text") or ""
-                        collected += text
-                        # After a failed tool, keep the model's next answer buffered until
-                        # its factual result can be checked below. Otherwise the UI/TTS can
-                        # already present a false "done" before the final event corrects it.
-                        if not any(not item.get("ok") for item in tool_results_for_run):
-                            emit({"type": "delta", "text": text})
-                    elif event.get("type") == "provider_fallback":
-                        emit(event)
-                    elif event.get("type") == "final":
-                        final = event.get("message") or {}
-            except llm.LLMError as exc:
-                self._update_task(task_id, status="failed", checkpoint="Модель не ответила: " + str(exc)[:300],
-                                  checkpoint_type="error", error=str(exc)[:800])
-                emit({"type": "error", "message": str(exc)})
-                return
-            except Exception as exc:  # noqa: BLE001
-                self._update_task(task_id, status="failed", checkpoint="Ошибка модели: " + str(exc)[:300],
-                                  checkpoint_type="error", error=str(exc)[:800])
-                emit({"type": "error", "message": f"Неожиданная ошибка модели: {exc}"})
+            if stopped:
                 return
 
-            if stop_event.is_set():
-                if collected.strip():
-                    partial = {"role": "assistant", "content": collected, "tool_calls": [], "ts": time.time(), "stopped": True}
-                    self.store.append_message(chat_id, partial)
-                    emit({"type": "step_end", "message": partial, "stopped": True})
-                self._update_task(task_id, status="interrupted", checkpoint="Выполнение остановлено пользователем.",
-                                  checkpoint_type="interrupted")
-                emit({"type": "stopped"})
-                return
-
-            content = (final or {}).get("content")
-            if content is None:
-                content = collected
-            tool_calls = (final or {}).get("tool_calls") or []
-            if not tool_calls and any(not item.get("ok") for item in tool_results_for_run):
-                content = _tool_outcome_report(tool_results_for_run, self.toolbox)
-            assistant_message: dict[str, Any] = {
-                "role": "assistant",
-                "content": content or "",
-                "tool_calls": tool_calls,
-                "ts": time.time(),
-            }
-            self.store.append_message(chat_id, assistant_message)
-            emit({"type": "step_end", "message": assistant_message})
+            assistant_message, tool_calls = self._save_assistant_step(
+                chat_id, final, collected, tool_results_for_run, emit
+            )
 
             if not tool_calls:
                 self._complete_task(task_id, "Ответ готов.", step=step + 1)
@@ -943,191 +1234,11 @@ class Agent:
                     emit({"type": "tool_result", "id": call_id, "name": name,
                           "ok": result["ok"], "text": result["text"], "media": []})
                     continue
-                mcp_tool = mcp_by_name.get(name)
-                label = (f"MCP · {mcp_tool['server_name']} / {mcp_tool['tool_name']}"
-                         if mcp_tool else self.toolbox.label(name))
-                allowed = (mode != "safe") if mcp_tool else self.toolbox.allowed(mode, name)
-                sensitive_read_path: Path | None = None
-                if allowed and name == "read_file":
-                    try:
-                        sensitive_read_path = self.toolbox.sensitive_file_path(str(args.get("path") or ""))
-                    except (OSError, RuntimeError, ValueError):
-                        sensitive_read_path = None
-                task_approval: dict[str, Any] = {}
-                if task_id and hasattr(self.store, "get_task"):
-                    try:
-                        task_approval = self.store.get_task(task_id).get("approval") or {}
-                    except (FileNotFoundError, ValueError):
-                        task_approval = {}
-                approved_by_plan = (not mcp_tool and allowed and
-                                    _approval_allows_tool(name, args, task_approval,
-                                                          str(settings.get("work_dir") or "")))
-                tainted_network_call = bool(read_taint_sources) and _is_network_tool(name, args, mcp_tool)
-                tainted_memory_write = name == "memory_save" and bool(untrusted_sources)
-                need_confirm = True if mcp_tool and allowed else (
-                    allowed and (self.toolbox.needs_confirm(mode, name) or tainted_network_call
-                                 or sensitive_read_path is not None or tainted_memory_write)
-                    and not approved_by_plan
+                need_confirm, approved, label = self._process_tool_call(
+                    chat_id, task_id, step, call_id, name, args, mode, settings,
+                    mcp_by_name, read_taint_sources, untrusted_sources,
+                    tool_results_for_run, emit, stop_event,
                 )
-                emit({
-                    "type": "tool_call",
-                    "id": call_id,
-                    "name": name,
-                    "label": label,
-                    "args": args,
-                    "allowed": allowed,
-                    "confirm": need_confirm,
-                })
-
-                result: dict[str, Any]
-                confirmation_image_seed: int | None = None
-                if not allowed:
-                    result = {
-                        "ok": False,
-                        "text": ("Действие заблокировано безопасным режимом. "
-                                 "Переключи режим доступа, если это действительно нужно."),
-                    }
-                else:
-                    approved = True
-                    command_sandbox_root = ""
-                    if need_confirm:
-                        self._update_task(task_id, status="waiting_confirmation",
-                                          checkpoint=f"Ожидается подтверждение: {label}.",
-                                          checkpoint_type="confirmation")
-                        confirmation_args = args
-                        if tainted_network_call:
-                            security_details, confirmation_image_seed = _network_confirmation_metadata(
-                                name, args, settings, read_taint_sources, self.toolbox, mcp_tool
-                            )
-                            confirmation_args = {
-                                **args, "_quanta_security_confirmation": security_details,
-                            }
-                        elif sensitive_read_path is not None:
-                            confirmation_args = {
-                                **args,
-                                "_quanta_security_confirmation": {
-                                    "warning": (
-                                        "Этот путь может содержать API-ключи, пароли, cookies или другие "
-                                        "личные данные. После подтверждения содержимое станет доступно модели."
-                                    ),
-                                    "destinations": [f"Локальный путь: {sensitive_read_path}"],
-                                },
-                            }
-                        elif tainted_memory_write:
-                            source_names = sorted(
-                                self.toolbox.label(source) if source in self.toolbox.tools else source
-                                for source in untrusted_sources
-                            )
-                            confirmation_args = {
-                                **args,
-                                "_quanta_security_confirmation": {
-                                    "warning": (
-                                        "Текст будет записан в память из недоверенных данных этого хода: "
-                                        + ", ".join(source_names)
-                                        + ". Проверь, что это именно факт для сохранения, а не инструкция со страницы или файла."
-                                    ),
-                                    "destinations": [],
-                                },
-                            }
-                        decision = self.confirm_fn(
-                            chat_id, call_id, name, confirmation_args, emit, stop_event
-                        )
-                        if isinstance(decision, dict):
-                            approved = bool(decision.get("allow"))
-                            if name == "run_command" and decision.get("sandbox"):
-                                try:
-                                    command_sandbox_root = str(
-                                        decision.get("root") or self.toolbox._resolve(str(args.get("cwd") or "."))
-                                    )
-                                except (OSError, RuntimeError, ValueError):
-                                    command_sandbox_root = ""
-                        else:
-                            approved = bool(decision)
-                        if approved:
-                            self._update_task(task_id, status="running",
-                                              checkpoint=f"Подтверждено пользователем: {label}.",
-                                              checkpoint_type="confirmation")
-                    if not approved:
-                        result = {"ok": False, "text": "Пользователь отклонил выполнение действия."}
-                    else:
-                        execute_args = dict(args)
-                        if name == "project_create":
-                            execute_args["_current_chat_id"] = chat_id
-                        if name == "run_command":
-                            if approved_by_plan and task_approval.get("sandbox_commands"):
-                                command_sandbox_root = str(task_approval.get("root") or "")
-                            if command_sandbox_root:
-                                execute_args["_sandbox_root"] = command_sandbox_root
-                        if name == "generate_image" and confirmation_image_seed is not None:
-                            execute_args["_quanta_seed"] = confirmation_image_seed
-                        result = (mcp_client.call_tool(mcp_tool["server_name"], mcp_tool["tool_name"], execute_args)
-                                  if mcp_tool else self.toolbox.execute(name, execute_args))
-
-                if result.get("ok") and not mcp_tool and name in _READ_TAINT_TOOLS:
-                    read_taint_sources.add(name)
-                    untrusted_sources.add(name)
-                if result.get("ok") and name in _NETWORK_TAINT_TOOLS:
-                    untrusted_sources.add(name)
-                if result.get("ok") and mcp_tool:
-                    untrusted_sources.add(
-                        f"MCP · {mcp_tool.get('server_name') or 'сервер'} / "
-                        f"{mcp_tool.get('tool_name') or 'инструмент'}"
-                    )
-
-                tool_results_for_run.append({
-                    "name": name,
-                    "ok": bool(result.get("ok")),
-                    "text": str(result.get("text") or ""),
-                })
-
-                if self.toolbox.risk(name) != "read":
-                    summary = "Не выполнено" if not result.get("ok") else "Выполнено"
-                    if result.get("ok") and name in ("write_file", "move_path", "copy_path", "delete_path", "open_path"):
-                        raw_path = args.get("path") or args.get("dst") or args.get("src") or ""
-                        basename = str(raw_path).replace("\\", "/").rstrip("/").split("/")[-1]
-                        if basename:
-                            summary += ": " + basename[:80]
-                    elif result.get("ok") and name.startswith("notes_"):
-                        summary = "Изменение локальных заметок"
-                    elif result.get("ok") and name.startswith("reminder_"):
-                        summary = "Изменение локальных напоминаний"
-                    elif result.get("ok") and name.startswith("memory_"):
-                        summary = "Изменение локальной памяти"
-                    elif result.get("ok") and name.startswith("project_"):
-                        summary = "Изменение карточки проекта"
-                    self.store.record_action({
-                        "name": name,
-                        "label": label,
-                        "summary": summary,
-                        "ok": bool(result.get("ok")),
-                        "undo": result.get("_undo"),
-                    })
-
-                tool_message = {
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "name": name,
-                    "content": result.get("text") or "",
-                    "ok": bool(result.get("ok")),
-                    "media": result.get("media") or [],
-                    "ts": time.time(),
-                }
-                self.store.append_message(chat_id, tool_message)
-                self._update_task(
-                    task_id,
-                    status="running",
-                    checkpoint=f"{label}: {str(result.get('text') or ('выполнено' if result.get('ok') else 'не выполнено'))[:500]}",
-                    checkpoint_type="tool_result",
-                    step=step + 1,
-                )
-                emit({
-                    "type": "tool_result",
-                    "id": call_id,
-                    "name": name,
-                    "ok": bool(result.get("ok")),
-                    "text": result.get("text") or "",
-                    "media": result.get("media") or [],
-                })
 
                 if need_confirm and not approved:
                     pending_text = "Остановлено после отклонения предыдущего действия."
