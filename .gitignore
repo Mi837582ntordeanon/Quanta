@@ -32,3 +32,12 @@ env/
 *.wav
 *.mp3
 *.ogg
+
+# Generated review handoff bundles and manifests
+/review/
+/Quanta-review.zip
+
+# Local diagnostics and user-provided workspace file; never commit or archive
+/_voice_blob_check.py
+/_voice_fs_check.py
+/Текстовый документ.txt

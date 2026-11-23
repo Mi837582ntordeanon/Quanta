@@ -378,6 +378,9 @@ def _stream_ollama(
     eval_token_limit = settings.get("_quanta_eval_max_tokens")
     if eval_token_limit is not None:
         options["num_predict"] = max(32, min(1024, int(eval_token_limit)))
+    eval_seed = settings.get("_quanta_eval_seed")
+    if eval_seed is not None:
+        options["seed"] = int(eval_seed)
     if settings.get("_quanta_warmup"):
         options["num_predict"] = 1
     payload: dict[str, Any] = {

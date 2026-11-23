@@ -29,6 +29,31 @@ class ModelOrchestrationTests(unittest.TestCase):
         self.assertNotIn("num_predict", default_payload["options"])
         self.assertEqual(bounded_payload["options"]["num_predict"], 96)
 
+    def test_live_eval_temperature_and_seed_are_passed_to_ollama(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return iter([b'{"done": true, "message": {"content": ""}}\n'])
+
+        settings = {
+            "model": "test-model",
+            "temperature": 0.25,
+            "_quanta_eval_max_tokens": 128,
+            "_quanta_eval_seed": 73,
+        }
+        with patch("assistant.llm.urllib.request.urlopen", return_value=FakeResponse()) as request:
+            list(llm._stream_ollama(settings, [], None))
+        payload = json.loads(request.call_args.args[0].data)
+
+        self.assertEqual(payload["options"]["temperature"], 0.25)
+        self.assertEqual(payload["options"]["num_predict"], 128)
+        self.assertEqual(payload["options"]["seed"], 73)
+
     def test_falls_back_before_any_output(self):
         settings = {
             "provider": "ollama", "model": "qwen3:4b-instruct",
