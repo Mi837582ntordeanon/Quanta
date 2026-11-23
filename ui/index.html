@@ -39,6 +39,7 @@
       <button data-open="reminders"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4M16 3v4M4 10h16M8 14h3"/></svg></span><span>Напоминания</span></button>
       <button data-open="workflows"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="M8 6h4a4 4 0 0 1 4 4v6M6 8v10h10"/></svg></span><span>Сценарии</span></button>
       <button data-open="actions"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8.5"/><path d="M4 4v4.5h4.5M12 7v5l3 2"/></svg></span><span>История действий</span></button>
+      <button data-open="traces"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h10M4 19h16"/><circle cx="18" cy="12" r="2"/></svg></span><span>Трассы</span></button>
       <button data-open="diagnostics"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 5 12 2.5-6h4"/></svg></span><span>Диагностика</span></button>
       <button data-open="analytics"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></span><span>Статистика</span></button>
       <button data-open="settings"><span class="ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></span><span>Настройки</span></button>
@@ -77,7 +78,7 @@
       </div>
     </header>
 
-    <div class="content">
+    <div class="content" id="content">
       <section class="chat-panel">
         <div class="chat-scroll" id="chatScroll">
           <div class="welcome" id="welcome">
@@ -132,6 +133,16 @@
         </div>
       </aside>
     </div>
+    <section class="traces-page hidden" id="tracesPage" aria-labelledby="tracesTitle">
+      <header class="traces-head">
+        <div><h1 id="tracesTitle">Трассы ходов</h1><p>Шаги, вызовы инструментов, задержки и решения подтверждения.</p></div>
+        <div class="traces-actions">
+          <button class="btn small" id="tracesRefreshBtn" type="button">Обновить</button>
+          <button class="btn small danger" id="tracesClearBtn" type="button">Очистить трассы</button>
+        </div>
+      </header>
+      <div class="traces-list" id="tracesList" aria-live="polite"><div class="empty-state">Загружаю трассы…</div></div>
+    </section>
   </main>
 </div>
 

@@ -1229,3 +1229,33 @@ body[data-orb="listening"] .presence-monogram .presence-indicator { background: 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ------------------------------------------------------------------ traces */
+.traces-page { flex: 1; min-height: 0; overflow-y: auto; padding: 28px clamp(18px, 4vw, 54px) 42px; }
+.traces-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; max-width: 1120px; margin: 0 auto 22px; }
+.traces-head h1 { margin: 0; font-size: 23px; font-weight: 620; letter-spacing: -.45px; }
+.traces-head p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.traces-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.traces-list { display: grid; gap: 15px; max-width: 1120px; margin: 0 auto; }
+.trace-turn { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: #191a17; }
+.trace-turn > header { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 15px; border-bottom: 1px solid var(--line-soft); }
+.trace-turn > header b, .trace-turn > header small { display: block; }
+.trace-turn > header b { font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.trace-turn > header small, .trace-turn > header > span { color: var(--dim); font-size: 10.5px; }
+.trace-turn > header small { margin-top: 4px; }
+.trace-events { display: grid; }
+.trace-event { min-width: 0; padding: 10px 15px; border-bottom: 1px solid var(--line-soft); border-left: 2px solid transparent; }
+.trace-event:last-child { border-bottom: 0; }
+.trace-event.success { border-left-color: #6b9a79; }
+.trace-event.failed { border-left-color: #c77970; }
+.trace-event.pending { border-left-color: #c6a96d; }
+.trace-event-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.trace-event-head b { font-size: 11px; font-weight: 570; overflow-wrap: anywhere; }
+.trace-event-head time { flex: 0 0 auto; color: var(--dim); font-size: 9px; font-variant-numeric: tabular-nums; }
+.trace-event pre { margin: 6px 0 0; color: var(--muted); font: 10px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .traces-page { padding: 21px 12px 30px; }
+  .traces-head h1 { font-size: 20px; }
+  .trace-turn > header { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .trace-event { padding: 9px 11px; }
+}

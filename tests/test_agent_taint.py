@@ -8,7 +8,7 @@ from urllib.parse import quote_plus
 from unittest.mock import patch
 
 from assistant import storage
-from assistant.agent import Agent, _READ_TAINT_TOOLS
+from assistant.agent import Agent, _READ_TAINT_TOOLS, _claimed_action_tools, _unverified_action_claims
 from assistant.tools import Toolbox, tool
 
 
@@ -109,6 +109,73 @@ class AgentTaintTests(unittest.TestCase):
         self.assertTrue(toolbox.tools["web_search"]["network"])
         self.assertTrue(toolbox.tools["fetch_url"]["network"])
 
+    def test_action_claim_retry_calls_tool_before_claiming_success(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, chat, data_dir, chats_dir = self.make_store(root)
+            store.save_settings({"model": "qwen3:4b-instruct", "tool_exposure_mode": "on"})
+            agent = Agent(store, Toolbox(store), lambda *_args: True)
+            responses = [
+                {"content": "Готово.", "tool_calls": []},
+                {"content": "", "tool_calls": [{"id": "write", "name": "write_file",
+                                                    "arguments": {"path": "draft.txt", "content": "safe"}}]},
+                {"content": "Создала файл draft.txt.", "tool_calls": []},
+            ]
+            observed_messages = []
+            events = []
+
+            def fake_stream(_settings, messages, _tools):
+                observed_messages.append(messages)
+                response = responses.pop(0)
+                yield {"type": "final", "message": {"role": "assistant", **response}}
+
+            with patch.object(storage, "DATA_DIR", data_dir), \
+                 patch.object(storage, "CHATS_DIR", chats_dir), \
+                 patch("assistant.agent.mcp_client.CONFIG_PATH", data_dir / "mcp_servers.json"), \
+                 patch("assistant.agent.llm.stream_chat", side_effect=fake_stream):
+                agent.run(chat["id"], "Создай файл draft.txt", events.append, threading.Event())
+                self.assertEqual((Path(root) / "draft.txt").read_text(encoding="utf-8"), "safe")
+
+            retries = [event for event in events if event.get("type") == "action_claim_retry"]
+            self.assertEqual(len(retries), 1)
+            self.assertIn("повторная проверка действия", observed_messages[1][0]["content"].casefold())
+            self.assertNotIn("действие не выполнено", events[-1]["message"]["content"].casefold())
+
+    def test_unverified_action_claim_gets_one_retry_then_warning(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, chat, data_dir, chats_dir = self.make_store(root)
+            store.save_settings({"model": "qwen3:4b-instruct", "tool_exposure_mode": "on"})
+            agent = Agent(store, Toolbox(store), lambda *_args: True)
+            responses = [
+                {"content": "Файл draft.txt создан.", "tool_calls": []},
+                {"content": "Файл draft.txt создан.", "tool_calls": []},
+            ]
+            events = []
+
+            def fake_stream(_settings, _messages, _tools):
+                response = responses.pop(0)
+                yield {"type": "final", "message": {"role": "assistant", **response}}
+
+            with patch.object(storage, "DATA_DIR", data_dir), \
+                 patch.object(storage, "CHATS_DIR", chats_dir), \
+                 patch("assistant.agent.mcp_client.CONFIG_PATH", data_dir / "mcp_servers.json"), \
+                 patch("assistant.agent.llm.stream_chat", side_effect=fake_stream):
+                agent.run(chat["id"], "Создай файл draft.txt", events.append, threading.Event())
+                chat_after = store.get_chat(chat["id"])
+
+            final = next(message for message in reversed(chat_after["messages"])
+                          if message.get("role") == "assistant" and message.get("content"))
+            retries = [event for event in events if event.get("type") == "action_claim_retry"]
+            self.assertEqual(len(retries), 1)
+            self.assertIn("Предупреждение: действие не выполнено.", final["content"])
+            self.assertEqual(list((Path(root)).glob("draft.txt")), [])
+
+    def test_claim_detector_ignores_negated_and_future_actions(self):
+        self.assertIn("write_file", _claimed_action_tools("Файл создан."))
+        self.assertEqual(_claimed_action_tools("Файл не создан. Я могу создать его."), set())
+        self.assertIn("notes_list", _claimed_action_tools("Нашла заметку про проверки."))
+        self.assertEqual(_unverified_action_claims("Готово.", [], {"write_file"}), {"write_file"})
+        self.assertEqual(_unverified_action_claims("Действие не выполнено.", [], {"write_file"}), set())
+
     def test_tool_without_network_opt_out_requires_confirm_after_read(self):
         with tempfile.TemporaryDirectory() as root:
             store, chat, data_dir, chats_dir = self.make_store(root)
@@ -173,6 +240,43 @@ class AgentTaintTests(unittest.TestCase):
                 if event.get("type") == "tool_call" and event.get("name") == "custom_lookup"
             )
             self.assertTrue(lookup_event["confirm"])
+
+    def test_directly_connected_write_still_requires_confirmation(self):
+        with tempfile.TemporaryDirectory() as root:
+            store, chat, data_dir, chats_dir = self.make_store(root, mode="smart")
+            toolbox = Toolbox(store)
+            confirmations = []
+            events = []
+            agent = Agent(store, toolbox, lambda *args: confirmations.append(args) or False)
+            seen_schemas = []
+
+            def fake_stream(_settings, _messages, schemas):
+                names = [item["function"]["name"] for item in schemas]
+                seen_schemas.append(names)
+                if len(seen_schemas) == 1:
+                    yield {"type": "final", "message": {"role": "assistant", "content": "", "tool_calls": [
+                        {"id": "write", "name": "write_file", "arguments": {
+                            "path": "draft.txt", "content": "test",
+                        }},
+                    ]}}
+                else:
+                    yield {"type": "final", "message": {"role": "assistant", "content": "Операция остановлена.", "tool_calls": []}}
+
+            with patch.object(storage, "DATA_DIR", data_dir), \
+                 patch.object(storage, "CHATS_DIR", chats_dir), \
+                 patch("assistant.agent.mcp_client.CONFIG_PATH", data_dir / "mcp_servers.json"), \
+                 patch.object(toolbox, "execute") as execute, \
+                 patch("assistant.agent.llm.stream_chat", side_effect=fake_stream):
+                agent.run(chat["id"], "Создай файл draft.txt", events.append, threading.Event())
+
+            self.assertIn("write_file", seen_schemas[0])
+            self.assertEqual(len(seen_schemas), 1)
+            execute.assert_not_called()
+            self.assertEqual(len(confirmations), 1)
+            self.assertEqual(confirmations[0][2], "write_file")
+            call_event = next(event for event in events if event.get("type") == "tool_call" and event.get("name") == "write_file")
+            self.assertTrue(call_event["allowed"])
+            self.assertTrue(call_event["confirm"])
 
 
 if __name__ == "__main__":

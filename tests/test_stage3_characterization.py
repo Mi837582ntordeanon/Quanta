@@ -16,6 +16,7 @@ import server as server_app
 from assistant import storage
 from assistant.agent import Agent
 from assistant.tools import Toolbox
+from assistant.trace_store import TraceStore
 from server import Handler, SESSION_TOKEN
 
 
@@ -122,6 +123,38 @@ class ServerRouteContractTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
             worker.join(timeout=2)
+
+    def test_traces_route_is_authenticated_and_returns_recent_records(self):
+        httpd, worker, base = self.start_server()
+        headers = {"X-Quanta-Session": SESSION_TOKEN}
+        with tempfile.TemporaryDirectory() as root:
+            trace_store = TraceStore(Path(root) / "traces")
+            trace_store.start_turn(chat_id="trace-chat", task_id=None, provider="ollama", model="local-model")
+            try:
+                with self.assertRaises(HTTPError) as denied:
+                    urlopen(Request(base + "/api/traces", headers={}), timeout=3)
+                self.assertEqual(denied.exception.code, 403)
+                denied.exception.close()
+
+                with patch.object(server_app, "TRACE_STORE", trace_store):
+                    with urlopen(Request(base + "/api/traces?limit=10", headers=headers), timeout=3) as response:
+                        body = json.loads(response.read().decode("utf-8"))
+                    with self.assertRaises(HTTPError) as denied_delete:
+                        urlopen(Request(base + "/api/traces", method="DELETE"), timeout=3)
+                    self.assertEqual(denied_delete.exception.code, 403)
+                    denied_delete.exception.close()
+                    with urlopen(Request(base + "/api/traces", headers=headers, method="DELETE"), timeout=3) as response:
+                        cleared = json.loads(response.read().decode("utf-8"))
+                self.assertTrue(body["ok"])
+                self.assertEqual(body["traces"][0]["event"], "turn_start")
+                self.assertEqual(body["traces"][0]["model"], "local-model")
+                self.assertTrue(cleared["ok"])
+                self.assertEqual(cleared["deleted_files"], 1)
+                self.assertEqual(trace_store.read_recent(), [])
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                worker.join(timeout=2)
 
     def test_get_post_put_and_delete_dispatch_through_route_tables(self):
         httpd, worker, base = self.start_server()

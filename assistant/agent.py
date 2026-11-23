@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
+import math
 import os
 import re
 import threading
@@ -27,6 +29,242 @@ ConfirmFn = Callable[[str, str, str, dict[str, Any], Emit, threading.Event], boo
 _READ_TAINT_TOOLS = {
     "read_file", "clipboard_get", "screenshot", "pc_vision", "pc_uia_tree",
 }
+
+_DIRECT_TOOL_NAMES = frozenset({
+    "list_dir", "read_file", "web_search", "memory_save", "open_path",
+})
+_DIRECT_TOOL_PREFIXES = ("notes_", "reminder_")
+_TOOL_INTENT_HINTS: dict[str, tuple[str, ...]] = {
+    "search_files": ("найди файл", "поиск файлов", "найти файл", "файл с именем", "поиск по папке"),
+    "write_file": ("создай файл", "запиши в файл", "сохрани в файл", "напиши файл", "сделай файл"),
+    "move_path": ("перемести файл", "перенеси файл", "переименуй файл", "перемести папку"),
+    "copy_path": ("скопируй файл", "сделай копию файла", "копия файла"),
+    "delete_path": ("удали файл", "удали папку", "удалить файл", "удалить папку"),
+    "fetch_url": ("скачай страницу", "прочитай сайт", "открой сайт текстом", "загрузи страницу"),
+    "weather": ("погода", "температура", "прогноз погоды"),
+    "screenshot": ("снимок экрана", "скриншот", "что на экране"),
+    "clipboard_get": ("буфер обмена", "что скопировано", "текст из буфера"),
+    "pc_app_list": ("список приложений", "какие приложения открыты", "запущенные приложения"),
+    "pc_app_open": ("открой приложение", "запусти приложение", "открой программу"),
+    "pc_app_close": ("закрой приложение", "закрой программу"),
+    "run_command": ("выполни команду", "запусти команду", "команда powershell", "команда cmd"),
+    "generate_image": ("нарисуй", "сгенерируй изображение", "создай картинку"),
+    "minecraft_status": ("статус сервера minecraft", "проверь сервер minecraft", "онлайн игроков"),
+    "yandex_music": ("включи музыку", "найди трек", "поставь песню", "яндекс музыка"),
+}
+_WORD_RE = re.compile(r"[a-zа-яё0-9]+", re.I)
+_STOP_WORDS = frozenset({
+    "а", "без", "бы", "в", "во", "вот", "для", "до", "его", "ее", "ей", "если", "же", "за", "и", "из",
+    "или", "к", "как", "ко", "мне", "на", "над", "не", "ни", "но", "о", "об", "от", "по", "под", "при",
+    "про", "с", "со", "так", "то", "у", "что", "это", "я", "моя", "мои", "мой", "пожалуйста",
+})
+_ACTION_CLAIM_PATTERNS: tuple[tuple[re.Pattern[str], frozenset[str]], ...] = (
+    (re.compile(r"\b(?:создал[аи]?|создан[ао]?|записал[аи]?|записан[ао]?|сохранил[аи]?|сохранен[аоё]?)\b.{0,55}\b(?:файл|документ)\w*|\b(?:файл|документ)\w*.{0,35}\b(?:создан[ао]?|записан[ао]?|сохранен[аоё]?)\b", re.I | re.S), frozenset({"write_file"})),
+    (re.compile(r"\b(?:создал[аи]?|добавил[аи]?|сохранил[аи]?|обновил[аи]?|изменил[аи]?)\b.{0,45}\bзаметк\w*|\bзаметк\w*.{0,35}\b(?:создан[ао]?|добавлен[ао]?|сохранен[аоё]?)\b", re.I | re.S), frozenset({"notes_create", "notes_update"})),
+    (re.compile(r"\b(?:создал[аи]?|добавил[аи]?|поставил[аи]?)\b.{0,45}\bнапоминан\w*|\bнапоминан\w*.{0,35}\b(?:создан[ао]?|добавлен[ао]?)\b", re.I | re.S), frozenset({"reminder_create"})),
+    (re.compile(r"\b(?:запомнил[аи]?|сохранил[аи]?)\b.{0,35}\b(?:в\s+)?памят\w*|\b(?:факт|информац\w*)\b.{0,35}\bзапомнен[ао]?\b", re.I | re.S), frozenset({"memory_save"})),
+    (re.compile(r"\b(?:удалил[аи]?|стер[ао]?|удален[ао]?)\b.{0,45}\b(?:файл|папк|заметк|напоминан)\w*", re.I | re.S), frozenset({"delete_path", "notes_delete", "reminder_delete"})),
+    (re.compile(r"\b(?:переместил[аи]?|переименовал[аи]?)\b.{0,45}\b(?:файл|папк)\w*", re.I | re.S), frozenset({"move_path"})),
+    (re.compile(r"\b(?:скопировал[аи]?)\b.{0,45}\b(?:файл|папк)\w*", re.I | re.S), frozenset({"copy_path"})),
+    (re.compile(r"\b(?:выполнил[аи]?|запустил[аи]?)\b.{0,45}\b(?:команд\w*|программ\w*)", re.I | re.S), frozenset({"run_command", "pc_app_open"})),
+    (re.compile(r"\b(?:открыл[аи]?)\b.{0,45}\b(?:файл|документ)\w*", re.I | re.S), frozenset({"read_file", "open_path"})),
+    (re.compile(r"\b(?:открыл[аи]?|запустил[аи]?)\b.{0,45}\b(?:приложен\w*|браузер|ссылк\w*)", re.I | re.S), frozenset({"open_path", "pc_app_open"})),
+    (re.compile(r"\b(?:нашел|нашла|нашли|поискал[аи]?|проверил[аи]?)\b.{0,45}\b(?:заметк|примечан)\w*", re.I | re.S), frozenset({"notes_list"})),
+    (re.compile(r"\b(?:нашел|нашла|нашли|посмотрел[аи]?|проверил[аи]?)\b.{0,45}\bнапоминан\w*", re.I | re.S), frozenset({"reminder_list"})),
+    (re.compile(r"\b(?:нашел|нашла|нашли|обнаружил[аи]?|проверил[аи]?)\b.{0,45}\b(?:файл|документ|папк)\w*", re.I | re.S), frozenset({"search_files", "list_dir", "read_file"})),
+    (re.compile(r"\b(?:увидел[аи]?|проверил[аи]?|снял[аи]?)\b.{0,45}\b(?:экран|окно|изображен\w*)", re.I | re.S), frozenset({"screenshot", "pc_vision", "pc_uia_tree"})),
+    (re.compile(r"\b(?:прочитал[аи]?|получил[аи]?|проверил[аи]?)\b.{0,45}\b(?:буфер\w*|скопирован\w*)", re.I | re.S), frozenset({"clipboard_get"})),
+    (re.compile(r"\b(?:нашел|нашла|нашли|получил[аи]?|проверил[аи]?)\b.{0,55}\b(?:в\s+интернет\w*|результат\w*|информац\w*|погод\w*)", re.I | re.S), frozenset({"web_search", "fetch_url", "weather"})),
+)
+_GENERIC_COMPLETION_RE = re.compile(
+    r"\b(?:готово|выполнен[ао]?|сделан[ао]?|завершен[ао]?|успешно|добавлен[ао]?|"
+    r"сохранен[аоё]?|создан[ао]?|удален[ао]?|отправлен[ао]?|запущен[ао]?|открыт[ао]?)\b",
+    re.I,
+)
+_GENERIC_REFUSAL_RE = re.compile(
+    r"\b(?:не\s+(?:выполнен[ао]?|сделан[ао]?|завершен[ао]?|создан[ао]?|удален[ао]?|"
+    r"добавлен[ао]?|сохранен[аоё]?|отправлен[ао]?|запущен[ао]?|открыт[ао]?|удалось)|"
+    r"отказал[аи]?|отклонен[ао]?)\b",
+    re.I,
+)
+
+
+def _claimed_action_tools(text: str) -> set[str]:
+    """Map clear past-tense action claims to tools that could have completed them."""
+    return {tool for _claim, tools in _claim_groups(text) for tool in tools}
+
+
+def _expected_action_tools(user_text: str, toolbox: Toolbox, mode: str) -> set[str]:
+    query = str(user_text or "").casefold().replace("ё", "е")
+    expected = {
+        name for name, hints in _TOOL_INTENT_HINTS.items()
+        if name in toolbox.tools and toolbox.allowed(mode, name)
+        and any(hint.replace("ё", "е") in query for hint in hints)
+    }
+    if any(word in query for word in ("заметк", "примечан")):
+        if any(word in query for word in ("создай", "создать", "сохрани", "добавь", "запиши")):
+            expected.add("notes_create")
+        elif any(word in query for word in ("удали", "удалить", "стереть")):
+            expected.add("notes_delete")
+        elif any(word in query for word in ("измени", "обнови", "редактируй")):
+            expected.add("notes_update")
+        else:
+            expected.add("notes_list")
+    if "напомин" in query:
+        expected.add("reminder_create" if any(word in query for word in ("напомни", "создай", "добавь")) else "reminder_list")
+    if "файл" in query or "документ" in query or "папк" in query:
+        if any(word in query for word in ("создай", "создать", "запиши", "сохрани в файл", "напиши файл")):
+            expected.add("write_file")
+        elif any(word in query for word in ("прочитай", "прочти", "содержимое")):
+            expected.add("read_file")
+        elif any(word in query for word in ("найди файл", "найти файл", "поиск файлов")):
+            expected.add("search_files")
+        elif any(word in query for word in ("покажи", "список", "какие файлы")):
+            expected.add("list_dir")
+    if "запомни" in query or "запомнить" in query or "сохрани в память" in query:
+        expected.add("memory_save")
+    return {name for name in expected if name in toolbox.tools and toolbox.allowed(mode, name)}
+
+
+def _unverified_action_claims(
+    text: str,
+    tool_results: list[dict[str, Any]],
+    expected_action_tools: set[str] | None = None,
+) -> set[str]:
+    successful = {str(item.get("name") or "") for item in tool_results if item.get("ok")}
+    unverified: set[str] = set()
+    groups = _claim_groups(text)
+    for _claim, candidates in groups:
+        if not (successful & candidates):
+            unverified.update(candidates)
+    if (not groups and expected_action_tools and not _GENERIC_REFUSAL_RE.search(str(text or ""))
+            and _GENERIC_COMPLETION_RE.search(str(text or ""))
+            and not (successful & expected_action_tools)):
+        unverified.update(expected_action_tools)
+    return unverified
+
+
+def _claim_groups(text: str) -> list[tuple[str, frozenset[str]]]:
+    groups: list[tuple[str, frozenset[str]]] = []
+    for pattern, candidates in _ACTION_CLAIM_PATTERNS:
+        normalized_text = str(text or "").replace("ё", "е").replace("Ё", "Е")
+        for match in pattern.finditer(normalized_text):
+            before = normalized_text[max(0, match.start() - 10):match.start()]
+            if not re.search(r"\bне\s*$", before, re.I) and not re.search(r"\bне\b", match.group(0), re.I):
+                groups.append((match.group(0), candidates))
+    return groups
+
+
+def _direct_tools_enabled(settings: dict[str, Any]) -> bool:
+    """Choose the default exposure mode from an explicit override or model size."""
+    preference = str(settings.get("tool_exposure_mode") or "auto").strip().lower()
+    if preference == "on":
+        return True
+    if preference == "off":
+        return False
+    model = str(settings.get("model") or "")
+    sizes = re.findall(r"(?<![a-z0-9])(\d+(?:\.\d+)?)\s*b(?![a-z])", model, re.I)
+    return bool(sizes and float(sizes[-1]) <= 8.0)
+
+
+def _direct_tool_names(toolbox: Toolbox, mode: str) -> set[str]:
+    return {
+        name for name in toolbox.tools
+        if (name in _DIRECT_TOOL_NAMES or name.startswith(_DIRECT_TOOL_PREFIXES))
+        and toolbox.allowed(mode, name)
+    }
+
+
+@lru_cache(maxsize=1)
+def _optional_fastembed_model() -> Any | None:
+    """Load a cached multilingual FastEmbed model without making network requests."""
+    try:
+        from fastembed import TextEmbedding
+        return TextEmbedding(
+            model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            local_files_only=True,
+            threads=2,
+        )
+    except Exception:  # Optional package/model/cache; keyword ranking remains available.
+        return None
+
+
+def _embedding_relevance(query: str, candidates: list[tuple[str, dict[str, Any]]]) -> dict[str, float] | None:
+    model = _optional_fastembed_model()
+    if model is None or not candidates:
+        return None
+    texts = [query, *[
+        f"{name}. {str(tool.get('description') or '')}"
+        for name, tool in candidates
+    ]]
+    try:
+        vectors = [[float(value) for value in vector] for vector in model.embed(texts)]
+        if len(vectors) != len(texts):
+            return None
+        query_vector = vectors[0]
+        query_norm = math.sqrt(sum(value * value for value in query_vector))
+        if not query_norm:
+            return None
+        scores = {}
+        for index, (name, _tool) in enumerate(candidates, start=1):
+            vector = vectors[index]
+            norm = math.sqrt(sum(value * value for value in vector))
+            scores[name] = sum(a * b for a, b in zip(query_vector, vector)) / (query_norm * norm) if norm else 0.0
+        return scores
+    except Exception:  # Optional model errors must not disable tools.
+        return None
+
+
+def _select_tools_for_request(
+    toolbox: Toolbox,
+    mode: str,
+    request: str,
+    *,
+    limit: int = 6,
+) -> list[str]:
+    """Rank relevant non-core tools by lightweight keywords and cached embeddings."""
+    candidates = [
+        (name, tool) for name, tool in toolbox.tools.items()
+        if toolbox.allowed(mode, name)
+        and name not in _direct_tool_names(toolbox, mode)
+    ]
+    if not candidates or not str(request).strip():
+        return []
+
+    query = str(request).casefold().replace("ё", "е")
+    query_words = {word for word in _WORD_RE.findall(query) if word not in _STOP_WORDS and len(word) > 2}
+    keyword_scores: dict[str, float] = {}
+    for name, tool in candidates:
+        searchable = f"{name} {tool.get('description') or ''}".casefold().replace("ё", "е")
+        candidate_words = {word for word in _WORD_RE.findall(searchable) if len(word) > 2}
+        score = float(sum(1 for word in query_words if word in candidate_words))
+        for hint in _TOOL_INTENT_HINTS.get(name, ()):
+            if hint.replace("ё", "е") in query:
+                score += 5.0
+        if "заметк" in query and name.startswith("notes_"):
+            score += 1.0
+        if "напомин" in query and name.startswith("reminder_"):
+            score += 1.0
+        if "файл" in query and name in {"search_files", "write_file", "move_path", "copy_path", "delete_path"}:
+            score += 0.5
+        keyword_scores[name] = score
+
+    embedding_scores = _embedding_relevance(str(request), candidates)
+    if embedding_scores:
+        ranked = sorted(
+            (name for name, _tool in candidates),
+            key=lambda name: (embedding_scores.get(name, 0.0), keyword_scores.get(name, 0.0), name),
+            reverse=True,
+        )
+        # An embedding-only low-confidence guess should defer to tool_search.
+        scored = [name for name in ranked if embedding_scores.get(name, 0.0) >= 0.30 or keyword_scores.get(name, 0) > 0]
+    else:
+        scored = sorted(
+            (name for name, _tool in candidates if keyword_scores[name] > 0),
+            key=lambda name: (keyword_scores[name], name),
+            reverse=True,
+        )
+    return scored[:max(0, min(6, int(limit)))]
 
 
 def _is_network_tool(
@@ -669,6 +907,7 @@ class Agent:
         tone_mode: str,
         chat: dict[str, Any],
         mcp_warnings: list[str],
+        action_claim_retry: bool = False,
     ) -> list[dict[str, Any]]:
         system_prompt = build_system_prompt(
             self.store,
@@ -677,19 +916,44 @@ class Agent:
             project=self.store.get_project_for_chat(chat_id),
             memory_query=user_text,
         )
+        if _direct_tools_enabled(settings):
+            tool_selection = (
+                "Сначала используй напрямую переданные инструменты, если среди них есть подходящий. "
+                "Вызывай tool_search только для инструмента, которого нет среди уже переданных схем; "
+                "после его выбора используй подключённую схему."
+            )
+            planning = (
+                " Для действительно многошаговой задачи можешь сохранить краткий план через task_plan; "
+                "планирование не требуется перед отдельным чтением или одним действием. "
+                "Если план предложен, он остановится для одобрения пользователя. Не пытайся заменить или скрыть это подтверждение."
+            )
+        else:
+            tool_selection = (
+                "Если нужен инструмент, сначала вызови tool_search и выбери подходящие имена из его каталога, "
+                "затем используй подключённые схемы."
+            )
+            planning = (
+                " Для многошаговой задачи сохрани вначале краткий план через task_plan; "
+                "перед продолжением план остановится для одобрения пользователем. Не пытайся заменить или скрыть его."
+            )
         system_prompt += (
             "\n\nВЫБОР ИНСТРУМЕНТОВ: Сначала определи, нужен ли реальный доступ к данным или действие. "
-            "Если нужен, вызови tool_search и выбери подходящие имена из его каталога. "
-            "Затем вызови подключённые инструменты и опирайся на их результат. "
-            "Не заявляй, что проверила ПК, сайт или приложение, если инструмент этого не подтвердил. "
+            + tool_selection
+            + " Не заявляй, что проверила ПК, сайт или приложение, если инструмент этого не подтвердил. "
             "Если нужного инструмента нет в каталоге, честно скажи об этом."
-            " Для многошаговой задачи сохрани вначале краткий план через task_plan; "
-            "перед продолжением план остановится для одобрения пользователем. Не пытайся заменить или скрыть его. "
-            "Записи файлов по умолчанию останутся выключены; запуск команд одобряется только точным полным текстом и рабочей папкой в выбранной пользователем границе. "
-            "после каждого фактического действия приложение автоматически сохраняет результат в checkpoint."
+            + planning
+            + " Записи файлов по умолчанию останутся выключены; запуск команд одобряется только точным полным текстом и рабочей папкой в выбранной пользователем границе. "
+            "После каждого фактического действия приложение автоматически сохраняет результат в checkpoint."
         )
         if mcp_warnings:
             system_prompt += "\n\nЧасть MCP-серверов недоступна: " + "; ".join(mcp_warnings[:8])
+        if action_claim_retry:
+            system_prompt += (
+                "\n\nПОВТОРНАЯ ПРОВЕРКА ДЕЙСТВИЯ: В предыдущем ответе прозвучало утверждение, "
+                "что действие уже выполнено, но успешный вызов инструмента этого не подтвердил. "
+                "Один раз проверь запрос: вызови нужный инструмент, если действие требуется; "
+                "иначе честно сообщи, что действие не выполнено. Не утверждай успех без результата инструмента."
+            )
         history = _trim_messages(chat.get("messages") or [])
         return [{"role": "system", "content": system_prompt}] + _to_api_messages(history)
 
@@ -756,6 +1020,9 @@ class Agent:
         tool_calls = (final or {}).get("tool_calls") or []
         if not tool_calls and any(not item.get("ok") for item in tool_results_for_run):
             content = _tool_outcome_report(tool_results_for_run, self.toolbox)
+            requested_content = str((final or {}).get("content") or collected or "")
+            if "действие не выполнено" in requested_content.casefold():
+                content += "\n\nПредупреждение: действие не выполнено."
         assistant_message: dict[str, Any] = {
             "role": "assistant",
             "content": content or "",
@@ -854,6 +1121,8 @@ class Agent:
         mode: str,
         settings: dict[str, Any],
         mcp_by_name: dict[str, dict[str, Any]],
+        connected_tools: set[str],
+        connected_mcp_tools: set[str],
         read_taint_sources: set[str],
         untrusted_sources: set[str],
         tool_results_for_run: list[dict[str, Any]],
@@ -864,7 +1133,8 @@ class Agent:
         mcp_tool = mcp_by_name.get(name)
         label = (f"MCP · {mcp_tool['server_name']} / {mcp_tool['tool_name']}"
                  if mcp_tool else self.toolbox.label(name))
-        allowed = (mode != "safe") if mcp_tool else self.toolbox.allowed(mode, name)
+        connected = name in connected_mcp_tools if mcp_tool else name in connected_tools
+        allowed = connected and ((mode != "safe") if mcp_tool else self.toolbox.allowed(mode, name))
         sensitive_read_path: Path | None = None
         if allowed and name == "read_file":
             try:
@@ -1028,10 +1298,22 @@ class Agent:
         selected_mcp_tools: set[str] = set()
         search_schema = _tool_search_schema(self.toolbox, mode, external_tools)
         plan_schema = _task_plan_schema()
-        tool_schemas = [search_schema, plan_schema]
+        exposure_enabled = _direct_tools_enabled(settings)
+        connected_tools = (
+            _direct_tool_names(self.toolbox, mode)
+            | set(_select_tools_for_request(self.toolbox, mode, user_text))
+            if exposure_enabled else set()
+        )
+        tool_schemas = [
+            search_schema, plan_schema,
+            *self.toolbox.schemas(sorted(connected_tools)),
+        ]
         runtime_settings = llm.effective_runtime_settings(settings)
         search_count = 0
         tool_results_for_run: list[dict[str, Any]] = []
+        action_claim_retry_count = 0
+        action_claim_retry_pending = False
+        expected_action_tools = _expected_action_tools(user_text, self.toolbox, mode)
 
         # Tool discovery is a model decision. Allow up to two discovery turns
         # outside the configured execution budget so a task can add a missing
@@ -1045,14 +1327,33 @@ class Agent:
 
             emit({"type": "step_start", "step": step})
             api_messages = self._build_step_messages(
-                chat_id, user_text, settings, tone_mode, chat, mcp_warnings
+                chat_id, user_text, settings, tone_mode, chat, mcp_warnings,
+                action_claim_retry=action_claim_retry_pending,
             )
+            action_claim_retry_pending = False
             final, collected, stopped = self._stream_model_step(
                 chat_id, task_id, runtime_settings, api_messages, tool_schemas,
                 emit, stop_event, tool_results_for_run,
             )
             if stopped:
                 return
+
+            tool_calls = (final or {}).get("tool_calls") or []
+            response_content = str((final or {}).get("content") or collected or "")
+            if not tool_calls:
+                unverified_claims = _unverified_action_claims(
+                    response_content, tool_results_for_run, expected_action_tools
+                )
+                if unverified_claims and action_claim_retry_count == 0:
+                    action_claim_retry_count = 1
+                    action_claim_retry_pending = True
+                    emit({"type": "action_claim_retry", "count": action_claim_retry_count,
+                          "tools": sorted(unverified_claims)})
+                    chat = self.store.get_chat(chat_id)
+                    continue
+                if unverified_claims and action_claim_retry_count:
+                    final = dict(final or {})
+                    final["content"] = response_content.rstrip() + "\n\nПредупреждение: действие не выполнено."
 
             assistant_message, tool_calls = self._save_assistant_step(
                 chat_id, final, collected, tool_results_for_run, emit
@@ -1205,9 +1506,10 @@ class Agent:
                     )) if isinstance(requested, list) else []
                     selected_tools.update(eligible_builtin)
                     selected_mcp_tools.update(eligible_mcp)
+                    connected_tools.update(eligible_builtin)
                     tool_schemas = [
                         search_schema, plan_schema,
-                        *self.toolbox.schemas(sorted(selected_tools)),
+                        *self.toolbox.schemas(sorted(connected_tools | selected_tools)),
                         *[_mcp_tool_schema(mcp_by_name[item]) for item in sorted(selected_mcp_tools)],
                     ]
                     eligible = [*eligible_builtin, *eligible_mcp]
@@ -1236,7 +1538,8 @@ class Agent:
                     continue
                 need_confirm, approved, label = self._process_tool_call(
                     chat_id, task_id, step, call_id, name, args, mode, settings,
-                    mcp_by_name, read_taint_sources, untrusted_sources,
+                    mcp_by_name, connected_tools, selected_mcp_tools,
+                    read_taint_sources, untrusted_sources,
                     tool_results_for_run, emit, stop_event,
                 )
 

@@ -48,7 +48,7 @@ class PersistentTaskTests(unittest.TestCase):
             self.assertEqual(len(results), 1)
             self.assertIn("голоса", results[0]["text"])
 
-    def test_model_selects_tools_from_catalogue_for_natural_language_intent(self):
+    def test_model_gets_common_tools_directly_without_a_discovery_turn(self):
         with tempfile.TemporaryDirectory() as root:
             data_dir = Path(root) / "data"
             chats_dir = data_dir / "chats"
@@ -63,10 +63,6 @@ class PersistentTaskTests(unittest.TestCase):
                     names = [item["function"]["name"] for item in tools]
                     seen_tool_sets.append(names)
                     if len(seen_tool_sets) == 1:
-                        yield {"type": "final", "message": {"role": "assistant", "content": "", "tool_calls": [
-                            {"id": "search", "name": "tool_search", "arguments": {"query": "покажи мои заметки", "names": ["notes_list"]}},
-                        ]}}
-                    elif len(seen_tool_sets) == 2:
                         self.assertIn("notes_list", names)
                         yield {"type": "final", "message": {"role": "assistant", "content": "", "tool_calls": [
                             {"id": "notes", "name": "notes_list", "arguments": {"query": ""}},
@@ -77,8 +73,9 @@ class PersistentTaskTests(unittest.TestCase):
                 with patch("assistant.agent.llm.stream_chat", side_effect=fake_stream):
                     agent.run(chat["id"], "Покажи мои заметки, пожалуйста", lambda _event: None, threading.Event())
 
-                self.assertEqual(seen_tool_sets[0], ["tool_search", "task_plan"])
-                self.assertIn("notes_list", seen_tool_sets[1])
+                self.assertEqual(len(seen_tool_sets), 2)
+                self.assertIn("tool_search", seen_tool_sets[0])
+                self.assertIn("task_plan", seen_tool_sets[0])
                 tasks = store.list_tasks(chat_id=chat["id"])
                 self.assertEqual(tasks[0]["status"], "completed")
 

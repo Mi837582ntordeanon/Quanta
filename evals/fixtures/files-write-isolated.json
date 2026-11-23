@@ -1,0 +1,9 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {"tool_calls": [{"id": "f2-discover", "name": "tool_search", "arguments": {"names": ["write_file"], "query": "Создать тестовый файл"}}]},
+    {"tool_calls": [{"id": "f2-write", "name": "write_file", "arguments": {"path": "plan.txt", "content": "Проверить изоляцию"}}]},
+    {"content": "Создала plan.txt в изолированной тестовой папке."}
+  ]
+}

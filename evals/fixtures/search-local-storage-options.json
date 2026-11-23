@@ -1,0 +1,9 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {"tool_calls": [{"id": "s2-discover", "name": "tool_search", "arguments": {"names": ["web_search"], "query": "Найти сведения о SQLite"}}]},
+    {"tool_calls": [{"id": "s2-search", "name": "web_search", "arguments": {"query": "SQLite в Python"}}]},
+    {"content": "Модуль sqlite3 предоставляет интерфейс к SQLite в Python."}
+  ]
+}

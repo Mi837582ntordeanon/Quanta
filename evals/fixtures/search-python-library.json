@@ -1,0 +1,9 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {"tool_calls": [{"id": "s1-discover", "name": "tool_search", "arguments": {"names": ["web_search"], "query": "Найти стандартную библиотеку Python"}}]},
+    {"tool_calls": [{"id": "s1-search", "name": "web_search", "arguments": {"query": "стандартная библиотека Python"}}]},
+    {"content": "В стандартной библиотеке Python есть документация встроенных модулей."}
+  ]
+}

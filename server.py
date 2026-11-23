@@ -45,6 +45,7 @@ from assistant.storage import (  # noqa: E402
     DATA_DIR, MEDIA_DIR, UI_DIR, Store,
 )
 from assistant.tools import Toolbox  # noqa: E402
+from assistant.trace_store import TraceStore  # noqa: E402
 from assistant.vision import VisionService  # noqa: E402
 
 PORT = int(os.environ.get("QUANTA_PORT", "8765"))
@@ -57,6 +58,10 @@ MINECRAFT = MinecraftServerManager()
 MINECRAFT_COMPANION = MinecraftCompanionManager(MINECRAFT, ROOT)
 VISION = VisionService(lambda: STORE.settings)
 TOOLBOX = Toolbox(STORE, minecraft=MINECRAFT, vision=VISION)
+TRACE_STORE = TraceStore(
+    DATA_DIR / "traces",
+    secret_redactor=STORE.redact_secrets,
+)
 ACTIVE: dict[str, threading.Event] = {}
 ACTIVE_LOCK = threading.Lock()
 TASK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="quanta-task")
@@ -501,6 +506,7 @@ def _route_context() -> RouteContext:
         open_app_window=open_app_window,
         request_resource_profile=request_resource_profile,
         system_stats=system_stats,
+        trace_store=TRACE_STORE,
         voice=voice,
         log=log,
     )
@@ -714,8 +720,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
+        settings = STORE.settings
+        try:
+            trace = TRACE_STORE.start_turn(
+                chat_id=chat_id,
+                task_id=task_id,
+                provider=str(settings.get("provider") or ""),
+                model=str(settings.get("model") or ""),
+            )
+        except Exception:
+            trace = None
+            log("agent trace initialization failed")
+        trace_status = "completed"
+
         def emit(event: dict[str, Any]) -> None:
-            nonlocal stop_event
+            nonlocal stop_event, trace_status
+            if trace is not None:
+                try:
+                    trace.record_agent_event(event)
+                except Exception:
+                    log("agent trace write failed")
+            if event.get("type") == "error":
+                trace_status = "failed"
+            elif event.get("type") == "stopped":
+                trace_status = "stopped"
+            elif event.get("type") == "done":
+                trace_status = "completed"
             if self.wfile.closed:
                 stop_event.set()
                 return
@@ -727,7 +757,27 @@ class Handler(BaseHTTPRequestHandler):
                 stop_event.set()
 
         emit({"type": "start", "chat_id": chat_id, "title": chat.get("title") or "Новый чат", "task_id": task_id})
-        agent = Agent(STORE, TOOLBOX, confirm_callback)
+        def traced_confirm(*args, **kwargs):
+            if trace is None:
+                return confirm_callback(*args, **kwargs)
+            call_id = str(args[1]) if len(args) > 1 else str(kwargs.get("call_id") or "")
+            name = str(args[2]) if len(args) > 2 else str(kwargs.get("name") or "")
+            started = time.monotonic()
+            try:
+                decision = confirm_callback(*args, **kwargs)
+            except Exception:
+                try:
+                    trace.record_confirmation(call_id, name, False, round((time.monotonic() - started) * 1000))
+                except Exception:
+                    log("agent trace confirmation write failed")
+                raise
+            try:
+                trace.record_confirmation(call_id, name, decision, round((time.monotonic() - started) * 1000))
+            except Exception:
+                log("agent trace confirmation write failed")
+            return decision
+
+        agent = Agent(STORE, TOOLBOX, traced_confirm)
         try:
             # Serialize model work so two chats cannot load models at once and
             # exhaust system memory. Pending runs are durable task records.
@@ -742,6 +792,11 @@ class Handler(BaseHTTPRequestHandler):
             log("agent error: " + traceback.format_exc())
             emit({"type": "error", "message": "Внутренняя ошибка агента. Подробности в data/quanta.log."})
         finally:
+            if trace is not None:
+                try:
+                    trace.finish(trace_status)
+                except Exception:
+                    log("agent trace finalization failed")
             with ACTIVE_LOCK:
                 ACTIVE.pop(chat_id, None)
             deny_pending_for_chat(chat_id)

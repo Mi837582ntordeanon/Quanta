@@ -1,0 +1,9 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {"tool_calls": [{"id": "n1-discover", "name": "tool_search", "arguments": {"names": ["notes_create"], "query": "Создать заметку"}}]},
+    {"tool_calls": [{"id": "n1-create", "name": "notes_create", "arguments": {"title": "Идея", "text": "Проверить новый интерфейс"}}]},
+    {"content": "Сохранила заметку «Идея»."}
+  ]
+}

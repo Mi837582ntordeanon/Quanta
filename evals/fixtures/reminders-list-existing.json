@@ -1,0 +1,9 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {"tool_calls": [{"id": "r2-discover", "name": "tool_search", "arguments": {"names": ["reminder_list"], "query": "Посмотреть напоминания"}}]},
+    {"tool_calls": [{"id": "r2-list", "name": "reminder_list", "arguments": {}}]},
+    {"content": "Есть напоминание: Позвонить завтра в 9:00."}
+  ]
+}

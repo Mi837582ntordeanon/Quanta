@@ -1,0 +1,9 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {"tool_calls": [{"id": "f1-discover", "name": "tool_search", "arguments": {"names": ["list_dir"], "query": "Просмотр тестовой папки"}}]},
+    {"tool_calls": [{"id": "f1-list", "name": "list_dir", "arguments": {"path": "."}}]},
+    {"content": "В тестовой папке есть alpha.txt и notes.md."}
+  ]
+}

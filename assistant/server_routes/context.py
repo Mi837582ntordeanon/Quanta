@@ -31,6 +31,7 @@ class RouteContext:
     stop: Any
     store: Any
     system_stats: Any
+    trace_store: Any
     toolbox: Any
     ui_dir: Any
     version: Any

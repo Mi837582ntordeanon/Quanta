@@ -375,6 +375,9 @@ def _stream_ollama(
         # while using less VRAM than 16K on an 8 GB GPU.
         "num_ctx": int(settings.get("model_context_size", 12288)),
     }
+    eval_token_limit = settings.get("_quanta_eval_max_tokens")
+    if eval_token_limit is not None:
+        options["num_predict"] = max(32, min(1024, int(eval_token_limit)))
     if settings.get("_quanta_warmup"):
         options["num_predict"] = 1
     payload: dict[str, Any] = {

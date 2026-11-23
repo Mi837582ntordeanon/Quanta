@@ -1,0 +1,9 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {"tool_calls": [{"id": "r1-discover", "name": "tool_search", "arguments": {"names": ["reminder_create"], "query": "Создать напоминание"}}]},
+    {"tool_calls": [{"id": "r1-create", "name": "reminder_create", "arguments": {"text": "Сделать перерыв", "when": "через 1 час"}}]},
+    {"content": "Напоминание «Сделать перерыв» добавлено на через 1 час."}
+  ]
+}

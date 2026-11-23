@@ -73,6 +73,7 @@ const state = {
   abort: null,
   mode: 'standard',
   drawerMode: '',
+  mainView: 'chat',
   editingProjectId: '',
   dataDir: '',
   commandSandbox: null,
@@ -115,6 +116,7 @@ function cacheDom() {
     'modeChip', 'resourceProfileSelect', 'modelSelect', 'accessSelect', 'settingsBtn', 'expandBtn', 'newChatBtn',
     'sidebarToggle', 'chatScroll', 'welcome', 'messages', 'input', 'sendBtn', 'stopBtn',
     'micBtn', 'settingsBtn', 'drawer', 'drawerTitle', 'drawerBody', 'drawerClose',
+    'content', 'telemetry', 'tracesPage', 'tracesList', 'tracesRefreshBtn', 'tracesClearBtn',
     'modalRoot', 'toasts', 'statusDot', 'statusText', 'clockTime', 'clockDate',
     'seriousModeBtn', 'presenceState', 'presenceDetail', 'presenceActivity',
     'weatherCity', 'weatherIcon', 'weatherTemp', 'weatherDesc', 'weatherRange',
@@ -969,6 +971,7 @@ function renderChats() {
 }
 
 async function newChat() {
+  switchMainView('chat');
   if (state.busy) await stopGeneration();
   state.chatId = null;
   state.messages = [];
@@ -987,6 +990,7 @@ async function newChat() {
 
 async function openChat(chatId, { silent = false } = {}) {
   if (!chatId) return;
+  switchMainView('chat');
   if (state.busy) await stopGeneration();
   try {
     const data = await api(`/api/chats/${encodeURIComponent(chatId)}`);
@@ -1209,7 +1213,124 @@ function closeDrawer() {
   dom.drawer?.classList.add('hidden');
 }
 
+function traceRecordMarkup(record) {
+  const event = String(record.event || 'event');
+  let title = event;
+  let detail = '';
+  let tone = '';
+  const duration = record.duration_ms == null ? '' : ` · ${Math.max(0, Number(record.duration_ms) || 0)} мс`;
+  if (event === 'step_start') title = `Шаг ${Number(record.step) || 0} начат`;
+  else if (event === 'step_end') title = `Шаг ${Number(record.step) || 0} завершён${duration}`;
+  else if (event === 'tool_call') {
+    title = `Вызов: ${record.name || 'инструмент'}`;
+    const access = record.allowed ? 'доступ разрешён' : 'заблокирован режимом';
+    const confirmation = record.requires_confirmation ? 'требует подтверждения' : 'без дополнительного подтверждения';
+    const argumentLengths = (Array.isArray(record.arguments) ? record.arguments : [])
+      .map((argument) => `${argument.name}: ${Number(argument.length) || 0} символов`);
+    const safeFields = record.safe_fields || {};
+    const safeDetails = [];
+    if (safeFields.application_name) safeDetails.push(`Приложение: ${safeFields.application_name}`);
+    if (safeFields.url_host) safeDetails.push(`Хост: ${safeFields.url_host}`);
+    if (safeFields.file_extension) safeDetails.push(`Расширение: ${safeFields.file_extension}`);
+    detail = [access, confirmation, ...argumentLengths, ...safeDetails].join('\n');
+    tone = record.allowed ? '' : ' failed';
+  } else if (event === 'tool_result') {
+    title = `${record.ok ? 'Вызов завершён' : `Ошибка: ${record.error_class || 'ошибка'}`}${duration}`;
+    detail = `Длина результата: ${Number(record.text_length) || 0} символов`;
+    tone = record.ok ? ' success' : ' failed';
+  } else if (event === 'confirmation_requested') {
+    title = `Ожидание подтверждения: ${record.name || 'действие'}`;
+    detail = record.kind === 'plan' ? 'План задачи' : 'Вызов инструмента';
+    tone = ' pending';
+  } else if (event === 'confirmation_decision') {
+    title = `Подтверждение: ${record.approved ? 'разрешено' : 'отклонено'}${duration}`;
+    detail = record.name || '';
+    tone = record.approved ? ' success' : ' failed';
+  } else if (event === 'planner_status') {
+    title = `Планировщик: ${record.status || 'состояние'}`;
+    detail = [record.provider, record.model, record.error_class].filter(Boolean).join(' · ');
+  } else if (event === 'provider_fallback') {
+    title = `Переключение модели: ${record.provider || ''} ${record.model || ''}`;
+    detail = record.error_class ? `Причина: ${record.error_class}` : '';
+    tone = ' pending';
+  } else if (event === 'error') {
+    title = `Ошибка хода: ${record.error_class || 'ошибка'}`;
+    tone = ' failed';
+  } else if (event === 'turn_start') {
+    title = 'Ход начат';
+    detail = [record.provider, record.model].filter(Boolean).join(' · ');
+  } else if (event === 'turn_done') {
+    title = 'Ход завершён';
+    detail = `Шагов: ${Number(record.steps) || 0}`;
+    tone = ' success';
+  } else if (event === 'turn_stopped') {
+    title = 'Ход остановлен';
+    tone = ' pending';
+  } else if (event === 'turn_end') {
+    title = `Завершение: ${record.status || 'неизвестно'}${duration}`;
+  } else {
+    return '';
+  }
+  const time = record.ts ? new Date(Number(record.ts) * 1000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+  return `<article class="trace-event${tone}"><div class="trace-event-head"><b>${escapeHtml(title)}</b><time>${escapeHtml(time)}</time></div>${detail ? `<pre>${escapeHtml(detail)}</pre>` : ''}</article>`;
+}
+
+async function renderTraces() {
+  if (!dom.tracesList) return;
+  dom.tracesList.innerHTML = '<div class="empty-state">Загружаю трассы…</div>';
+  try {
+    const data = await api('/api/traces?limit=500');
+    const records = Array.isArray(data.traces) ? data.traces : [];
+    if (!records.length) {
+      dom.tracesList.innerHTML = '<div class="empty-state">Трасс пока нет.</div>';
+      return;
+    }
+    const groups = new Map();
+    for (const record of records) {
+      const id = String(record.trace_id || 'unknown');
+      if (!groups.has(id)) groups.set(id, []);
+      groups.get(id).push(record);
+    }
+    const turns = [...groups.values()].reverse();
+    dom.tracesList.innerHTML = turns.map((items) => {
+      const start = items.find((item) => item.event === 'turn_start') || items[0];
+      const model = [start.provider, start.model].filter(Boolean).join(' · ') || 'Модель не указана';
+      const started = start.ts ? new Date(Number(start.ts) * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+      const entries = items.map(traceRecordMarkup).filter(Boolean).join('');
+      return `<section class="trace-turn"><header><div><b>${escapeHtml(model)}</b><small>${escapeHtml(started)}</small></div><span>${items.filter((item) => item.event === 'step_start').length} шага · ${items.filter((item) => item.event === 'tool_call').length} вызовов</span></header><div class="trace-events">${entries}</div></section>`;
+    }).join('');
+  } catch (err) {
+    dom.tracesList.innerHTML = `<div class="empty-state">Не удалось загрузить трассы: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+async function clearTraces() {
+  const confirmed = await confirmDialog({
+    title: 'Очистить трассы?',
+    text: 'Все сохранённые файлы трасс будут удалены. Чаты, файлы и настройки не изменятся.',
+    confirmLabel: 'Очистить трассы',
+    danger: true,
+  });
+  if (!confirmed) return;
+  try {
+    const result = await api('/api/traces', { method: 'DELETE' });
+    await renderTraces();
+    toast('Трассы очищены', `Удалено файлов: ${Number(result.deleted_files) || 0}`, 'success');
+  } catch (err) {
+    toast('Не удалось очистить трассы', err.message, 'error');
+  }
+}
+
+function switchMainView(view) {
+  const traces = view === 'traces';
+  state.mainView = traces ? 'traces' : 'chat';
+  dom.content?.classList.toggle('hidden', traces);
+  dom.tracesPage?.classList.toggle('hidden', !traces);
+  if (traces) renderTraces();
+}
+
 function openDrawer(kind) {
+  switchMainView('chat');
   if (kind === 'settings') {
     openSettings();
     return;
@@ -2066,6 +2187,8 @@ function openSettings() {
             <div class="field"><label>Провайдер</label><select id="setProvider">${opt('ollama', 'Ollama (локально)', s.provider)}${opt('openai', 'OpenAI-совместимый API', s.provider)}</select></div>
             <div class="field"><label>Модель</label><input id="setModel" list="modelOptions" value="${escapeAttr(s.model)}" placeholder="qwen3:4b-instruct"><datalist id="modelOptions">${modelOptions}</datalist></div>
           </div>
+          <div class="field u-mt-10"><label>Прямое подключение инструментов</label><select id="setToolExposure">${opt('auto', 'Авто · для моделей до 8B', s.tool_exposure_mode || 'auto')}${opt('on', 'Включено', s.tool_exposure_mode || 'auto')}${opt('off', 'Выключено', s.tool_exposure_mode || 'auto')}</select></div>
+          <div class="form-note u-mt-6">В режиме «Авто» часто используемые и подходящие к запросу инструменты доступны сразу. Для больших или неизвестных по размеру моделей этот режим можно включить здесь.</div>
           <div class="field u-mt-10"><label>Адрес Ollama</label><input id="setOllama" value="${escapeAttr(s.ollama_url)}"></div>
           <div class="settings-grid u-mt-10">
             <div class="field"><label>API URL</label><input id="setApiUrl" value="${escapeAttr(s.api_url)}"></div>
@@ -2259,6 +2382,7 @@ function openSettings() {
     const patch = {
       provider: form.querySelector('#setProvider').value,
       model: form.querySelector('#setModel').value.trim(),
+      tool_exposure_mode: form.querySelector('#setToolExposure').value,
       ollama_url: form.querySelector('#setOllama').value.trim(),
       api_url: form.querySelector('#setApiUrl').value.trim(),
       api_key: form.querySelector('#setApiKey').value,
@@ -3156,6 +3280,8 @@ function bindEvents() {
   dom.stopBtn?.addEventListener('click', stopGeneration);
   dom.newChatBtn?.addEventListener('click', newChat);
   dom.drawerClose?.addEventListener('click', closeDrawer);
+  dom.tracesRefreshBtn?.addEventListener('click', renderTraces);
+  dom.tracesClearBtn?.addEventListener('click', clearTraces);
   dom.settingsBtn?.addEventListener('click', openSettings);
   dom.seriousModeBtn?.addEventListener('click', () => setSeriousMode(!state.seriousMode));
   dom.sidebarToggle?.addEventListener('click', () => dom.app?.classList.toggle('sidebar-open'));
@@ -3253,7 +3379,13 @@ function bindEvents() {
     const openButton = event.target.closest('[data-open]');
     if (openButton) {
       event.preventDefault();
-      openDrawer(openButton.dataset.open);
+      if (openButton.dataset.open === 'traces') {
+        closeDrawer();
+        switchMainView('traces');
+        closeSidebar();
+      } else {
+        openDrawer(openButton.dataset.open);
+      }
       return;
     }
     const copyButton = event.target.closest('.code-head button');

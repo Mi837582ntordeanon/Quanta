@@ -1,0 +1,8 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {"tool_calls": [{"id": "d1-discover", "name": "tool_search", "arguments": {"names": ["delete_path"], "query": "Пользователь просит удалить файл"}}]},
+    {"tool_calls": [{"id": "d1-delete", "name": "delete_path", "arguments": {"path": "protected.txt"}}]}
+  ]
+}

@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -6,6 +7,28 @@ from assistant.agent import Agent
 
 
 class ModelOrchestrationTests(unittest.TestCase):
+    def test_live_eval_token_cap_is_added_only_when_requested(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return iter([b'{"done": true, "message": {"content": ""}}\n'])
+
+        with patch("assistant.llm.urllib.request.urlopen", return_value=FakeResponse()) as request:
+            list(llm._stream_ollama({"model": "test-model"}, [], None))
+            default_payload = json.loads(request.call_args.args[0].data)
+
+        with patch("assistant.llm.urllib.request.urlopen", return_value=FakeResponse()) as request:
+            list(llm._stream_ollama({"model": "test-model", "_quanta_eval_max_tokens": 96}, [], None))
+            bounded_payload = json.loads(request.call_args.args[0].data)
+
+        self.assertNotIn("num_predict", default_payload["options"])
+        self.assertEqual(bounded_payload["options"]["num_predict"], 96)
+
     def test_falls_back_before_any_output(self):
         settings = {
             "provider": "ollama", "model": "qwen3:4b-instruct",

@@ -237,6 +237,13 @@ def _handle_get_29(context: RouteContext, self, path, query, parsed):
     ok = open_app_window(f'http://127.0.0.1:{PORT}/?view={view}', width, height)
     self._json({'ok': ok})
     return
+def _matches_get_30(path: str) -> bool:
+    return path == '/api/traces'
+def _handle_get_30(context: RouteContext, self, path, query, parsed):
+    trace_store = context.trace_store
+    limit = int((query.get('limit') or ['300'])[0])
+    self._json({'ok': True, 'traces': trace_store.read_recent(limit)})
+    return
 GET_ROUTE_TABLE = (
     RouteDefinition("GET", "path in ('/', '/index.html')", _matches_get_0, _handle_get_0),
     RouteDefinition("GET", "path.startswith('/ui/')", _matches_get_1, _handle_get_1),
@@ -268,6 +275,7 @@ GET_ROUTE_TABLE = (
     RouteDefinition("GET", "path == '/api/reminders'", _matches_get_27, _handle_get_27),
     RouteDefinition("GET", "path == '/api/events'", _matches_get_28, _handle_get_28),
     RouteDefinition("GET", "path == '/api/window'", _matches_get_29, _handle_get_29),
+    RouteDefinition("GET", "path == '/api/traces'", _matches_get_30, _handle_get_30),
 )
 
 def dispatch_get(context: RouteContext, handler, path: str, query, parsed) -> None:

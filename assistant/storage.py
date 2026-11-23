@@ -76,6 +76,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "fallback_api_key": "",
     "fallback_routes": [],
     "model": "qwen3:4b-instruct",
+    "tool_exposure_mode": "auto",
     "temperature": 0.65,
     "max_steps": 8,
     "model_context_size": 12288,
@@ -397,6 +398,8 @@ class Store:
                 raise ValueError("Контекст модели должен быть 8K, 12K или 16K")
             if merged["model_keep_alive"] not in ("2m", "5m", "10m"):
                 raise ValueError("Время удержания модели должно быть 2, 5 или 10 минут")
+            if merged["tool_exposure_mode"] not in ("auto", "on", "off"):
+                raise ValueError("Режим прямого подключения инструментов должен быть auto, on или off")
             if merged["resource_profile"] not in ("work", "game"):
                 raise ValueError("Профиль ресурсов должен быть «Работа» или «Игра»")
             for key in ("memory_enabled", "global_hotkey_enabled", "model_warmup_on_start",

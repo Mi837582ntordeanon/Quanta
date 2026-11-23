@@ -1,0 +1,9 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {"tool_calls": [{"id": "n2-discover", "name": "tool_search", "arguments": {"names": ["notes_list"], "query": "Найти заметку про тесты"}}]},
+    {"tool_calls": [{"id": "n2-list", "name": "notes_list", "arguments": {"query": "тесты"}}]},
+    {"content": "В заметке «Проверки» записано: 117 тестов прошли."}
+  ]
+}

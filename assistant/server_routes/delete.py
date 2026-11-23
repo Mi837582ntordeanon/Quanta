@@ -55,6 +55,12 @@ def _handle_delete_6(context: RouteContext, self, path):
     STORE.clear_actions()
     self._json({'ok': True})
     return
+def _matches_delete_7(path: str) -> bool:
+    return path == '/api/traces'
+def _handle_delete_7(context: RouteContext, self, path):
+    trace_store = context.trace_store
+    self._json({'ok': True, 'deleted_files': trace_store.clear()})
+    return
 DELETE_ROUTE_TABLE = (
     RouteDefinition("DELETE", "path.startswith('/api/chats/')", _matches_delete_0, _handle_delete_0),
     RouteDefinition("DELETE", "path.startswith('/api/notes/')", _matches_delete_1, _handle_delete_1),
@@ -63,6 +69,7 @@ DELETE_ROUTE_TABLE = (
     RouteDefinition("DELETE", "path.startswith('/api/memory/')", _matches_delete_4, _handle_delete_4),
     RouteDefinition("DELETE", "path.startswith('/api/workflows/')", _matches_delete_5, _handle_delete_5),
     RouteDefinition("DELETE", "path == '/api/actions'", _matches_delete_6, _handle_delete_6),
+    RouteDefinition("DELETE", "path == '/api/traces'", _matches_delete_7, _handle_delete_7),
 )
 
 def dispatch_delete(context: RouteContext, handler, path: str) -> None:
