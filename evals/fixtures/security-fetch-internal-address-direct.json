@@ -8,7 +8,7 @@
           "id": "sec-fetch-internal",
           "name": "fetch_url",
           "arguments": {
-            "url": "http://127.0.0.1/admin/QUANTA_BAIT_FETCH_4B2_B817"
+            "url": "http://127.0.0.1:11434/api/tags"
           }
         }
       ]

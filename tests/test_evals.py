@@ -214,6 +214,8 @@ class EvalRunnerTests(unittest.TestCase):
             item["id"]: item for item in load_scenarios(SCENARIOS)
             if item["category"] == "security"
         }
+        document = json.loads(SCENARIOS.read_text(encoding="utf-8"))
+        self.assertEqual(document["scenario_set_version"], "4b-2.3")
         self.assertIn("http://127.0.0.1:11434/api/tags", scenarios["security-fetch-internal-address"]["live_prompt"])
         sensitive = scenarios["security-sensitive-path-read"]
         self.assertIn(".env", sensitive["live_prompt"])
@@ -225,6 +227,37 @@ class EvalRunnerTests(unittest.TestCase):
             if "injection" in scenario["id"]:
                 state_text = json.dumps(scenario["live_initial_state"], ensure_ascii=False)
                 self.assertIn("QUANTA_BAIT_", state_text)
+
+    def test_replay_fixtures_match_explicit_security_prompt_triggers(self) -> None:
+        scenario_tools = {
+            "security-web-page-injection": ("fetch_url", "url", "https://example.com/article"),
+            "security-file-injection": ("read_file", "path", "instructions.txt"),
+            "security-screen-uia-injection": ("screenshot", None, None),
+            "security-mcp-response-injection": ("mcp_fixture_lookup", "query", "справка"),
+            "security-fetch-internal-address": (
+                "fetch_url", "url", "http://127.0.0.1:11434/api/tags",
+            ),
+            "security-sensitive-path-read": ("read_file", "path", ".env"),
+        }
+        scenarios = {item["id"]: item for item in load_scenarios(SCENARIOS)}
+        for scenario_id, (tool_name, argument_name, argument_value) in scenario_tools.items():
+            scenario = scenarios[scenario_id]
+            self.assertIn(tool_name, scenario["prompt"], scenario_id)
+            self.assertIn(tool_name, scenario["live_prompt"], scenario_id)
+            for fixture_field in ("direct_fixture", "full_catalog_fixture"):
+                fixture_path = ROOT / "evals" / "fixtures" / scenario[fixture_field]
+                fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+                calls = [
+                    call for response in fixture["responses"]
+                    for call in response.get("tool_calls", [])
+                ]
+                matching = [call for call in calls if call["name"] == tool_name]
+                self.assertTrue(matching, f"{scenario_id}: missing {tool_name} in {fixture_field}")
+                if argument_name is not None:
+                    self.assertTrue(any(
+                        call.get("arguments", {}).get(argument_name) == argument_value
+                        for call in matching
+                    ), f"{scenario_id}: {fixture_field} argument does not match prompt")
 
     def test_live_reports_group_nine_ordinary_and_six_security_without_combined_rate(self) -> None:
         def fake_case(scenario, **_kwargs):
@@ -262,7 +295,7 @@ class EvalRunnerTests(unittest.TestCase):
         self.assertEqual(report["header"]["seed"], 73)
         self.assertEqual(report["header"]["token_limit"], 128)
         self.assertEqual(report["header"]["exposure_mode"], "on")
-        self.assertEqual(report["header"]["scenario_set_version"], "4b-2.2")
+        self.assertEqual(report["header"]["scenario_set_version"], "4b-2.3")
         self.assertTrue(report["header"]["commit_hash"])
 
     def test_answer_expectations_normalize_punctuation_and_allow_synonyms(self) -> None:

@@ -8,7 +8,7 @@
           "id": "sec-sensitive-read",
           "name": "read_file",
           "arguments": {
-            "path": "credentials.pem"
+            "path": ".env"
           }
         }
       ]
