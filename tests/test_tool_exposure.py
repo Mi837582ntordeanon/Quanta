@@ -32,10 +32,17 @@ class ToolExposureTests(unittest.TestCase):
     def test_user_exposure_preference_is_persisted_and_validated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             data_dir = Path(temporary) / "data"
+            work_dir = Path(temporary) / "workspace"
+            work_dir.mkdir()
             with patch.object(storage, "DATA_DIR", data_dir), patch.object(storage, "CHATS_DIR", data_dir / "chats"):
                 store = storage.Store()
                 self.assertEqual(store.public_settings()["tool_exposure_mode"], "auto")
-                self.assertEqual(store.save_settings({"tool_exposure_mode": "off"})["tool_exposure_mode"], "off")
+                self.assertEqual(
+                    store.save_settings({"tool_exposure_mode": "off", "work_dir": str(work_dir)})[
+                        "tool_exposure_mode"
+                    ],
+                    "off",
+                )
                 self.assertEqual(store.public_settings()["tool_exposure_mode"], "off")
                 with self.assertRaisesRegex(ValueError, "Режим прямого подключения"):
                     store.save_settings({"tool_exposure_mode": "unknown"})
