@@ -1,0 +1,35 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {
+      "tool_calls": [
+        {
+          "id": "c1-discover",
+          "name": "tool_search",
+          "arguments": {
+            "names": [
+              "write_file"
+            ],
+            "query": "Найти подходящие инструменты для запроса пользователя"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "c1-write",
+          "name": "write_file",
+          "arguments": {
+            "path": "approved.txt",
+            "content": "approved fixture"
+          }
+        }
+      ]
+    },
+    {
+      "content": "Создала approved.txt после подтверждения."
+    }
+  ]
+}

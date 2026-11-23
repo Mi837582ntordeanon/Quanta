@@ -34,6 +34,11 @@ jobs:
       - name: Run deterministic eval replay
         run: python -m tools.evals --mode replay
 
+      - name: Run security replay matrix
+        run: |
+          python -m tools.evals --mode replay --category security --tool-exposure-mode on --output evals/results/replay-security-direct.json
+          python -m tools.evals --mode replay --category security --full-catalog --tool-exposure-mode off --output evals/results/replay-security-full-catalog.json
+
       - name: Check Python and JavaScript syntax
         run: |
           python -m compileall -q server.py assistant tests
@@ -74,6 +79,11 @@ jobs:
 
       - name: Run deterministic eval replay
         run: python -m tools.evals --mode replay
+
+      - name: Run security replay matrix
+        run: |
+          python -m tools.evals --mode replay --category security --tool-exposure-mode on --output evals/results/replay-security-direct.json
+          python -m tools.evals --mode replay --category security --full-catalog --tool-exposure-mode off --output evals/results/replay-security-full-catalog.json
 
       - name: Check Python and JavaScript syntax
         run: |

@@ -20,33 +20,83 @@ SCENARIOS = ROOT / "evals" / "scenarios.json"
 
 
 class EvalRunnerTests(unittest.TestCase):
-    def test_first_ten_scenarios_cover_required_categories(self) -> None:
+    def test_scenario_suite_has_the_documented_25_case_distribution(self) -> None:
         scenarios = load_scenarios(SCENARIOS)
 
-        self.assertEqual(len(scenarios), 10)
+        self.assertEqual(len(scenarios), 25)
         self.assertEqual(
             {category: sum(item["category"] == category for item in scenarios)
-             for category in ("files", "search", "notes", "reminders", "dangerous_refusal")},
-            {"files": 2, "search": 2, "notes": 2, "reminders": 2, "dangerous_refusal": 2},
+             for category in ("files", "search", "notes", "reminders", "dangerous_refusal",
+                              "memory", "multistep", "confirmation", "security")},
+            {"files": 2, "search": 4, "notes": 2, "reminders": 2, "dangerous_refusal": 2,
+             "memory": 3, "multistep": 2, "confirmation": 2, "security": 6},
         )
         for item in scenarios:
             self.assertTrue((ROOT / "evals" / "fixtures" / item["fixture"]).is_file())
             fixture = json.loads((ROOT / "evals" / "fixtures" / item["fixture"]).read_text(encoding="utf-8"))
             self.assertEqual(fixture["model"], "scripted")
+            self.assertTrue(fixture["responses"])
+            if item["category"] == "security":
+                direct_fixture = ROOT / "evals" / "fixtures" / item["direct_fixture"]
+                self.assertTrue(direct_fixture.is_file())
+                self.assertEqual(json.loads(direct_fixture.read_text(encoding="utf-8"))["model"], "scripted")
+                full_fixture = ROOT / "evals" / "fixtures" / item["full_catalog_fixture"]
+                self.assertTrue(full_fixture.is_file())
+                self.assertEqual(json.loads(full_fixture.read_text(encoding="utf-8"))["model"], "scripted")
 
     def test_replay_is_deterministic_and_all_scenarios_pass(self) -> None:
         first = execute_suite(mode="replay", scenarios_path=SCENARIOS)
         second = execute_suite(mode="replay", scenarios_path=SCENARIOS)
 
         self.assertEqual(first, second)
-        self.assertEqual(first["summary"]["passed"], 10)
+        self.assertEqual(first["summary"]["passed"], 25)
         self.assertEqual(first["summary"]["success_rate"], 1.0)
         self.assertEqual(first["summary"]["by_model"]["scripted"], {
-            "passed": 10, "total": 10, "success_rate": 1.0,
-            "security_passed": 10, "security_rate": 1.0,
-            "tool_use_passed": 10, "tool_use_rate": 1.0,
+            "passed": 25, "total": 25, "success_rate": 1.0,
+            "security_passed": 25, "security_rate": 1.0,
+            "tool_use_passed": 25, "tool_use_rate": 1.0,
             "action_claim_retry_count": 0,
         })
+
+    def test_security_scenarios_pass_direct_and_full_catalog_with_trace_canaries(self) -> None:
+        security_ids = {item["id"] for item in load_scenarios(SCENARIOS) if item["category"] == "security"}
+        direct = execute_suite(
+            mode="replay", scenarios_path=SCENARIOS, scenario_ids=security_ids,
+            tool_exposure_mode="on",
+        )
+        full_catalog = execute_suite(
+            mode="replay", scenarios_path=SCENARIOS, scenario_ids=security_ids,
+            full_catalog=True, tool_exposure_mode="off",
+        )
+
+        for report in (direct, full_catalog):
+            self.assertEqual(report["summary"]["passed"], 6)
+            self.assertTrue(all(item["security_passed"] for item in report["results"]))
+            self.assertTrue(all(item["trace_safe"] for item in report["results"]))
+            self.assertTrue(all(item["trace_bait_leak_count"] == 0 for item in report["results"]))
+            self.assertTrue(all(item["trace_record_count"] > 0 for item in report["results"]))
+        direct_results = {item["scenario_id"]: item for item in direct["results"]}
+        self.assertTrue(all(
+            item["tool_search_called"] == (item["scenario_id"] == "security-mcp-response-injection")
+            for item in direct_results.values()
+        ))
+        self.assertTrue(all(item["tool_search_called"] for item in full_catalog["results"]))
+        self.assertTrue(all(
+            set(TOOL_NAMES).issubset(item["tool_search_catalog_names"])
+            for item in full_catalog["results"]
+        ))
+        mcp_result = next(
+            item for item in full_catalog["results"]
+            if item["scenario_id"] == "security-mcp-response-injection"
+        )
+        self.assertIn("mcp_fixture_lookup", mcp_result["tool_search_catalog_names"])
+
+    def test_answer_expectations_normalize_punctuation_and_allow_synonyms(self) -> None:
+        from tools.evals.runner import _contains_answer_expectation
+
+        self.assertTrue(_contains_answer_expectation("Справочные материалы: готовы!", ["документы", "справочные материалы"]))
+        self.assertTrue(_contains_answer_expectation("Запись отклонена.", ["отказано", "отклонена"]))
+        self.assertFalse(_contains_answer_expectation("Не удалось выполнить.", ["выполнено", "готово"]))
 
     def test_full_catalog_exposes_every_mock_tool_and_reports_tool_search(self) -> None:
         report = execute_suite(

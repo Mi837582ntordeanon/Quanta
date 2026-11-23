@@ -1,0 +1,48 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {
+      "tool_calls": [
+        {
+          "id": "x2-discover",
+          "name": "tool_search",
+          "arguments": {
+            "names": [
+              "notes_create",
+              "reminder_create"
+            ],
+            "query": "Найти подходящие инструменты для запроса пользователя"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "x2-note",
+          "name": "notes_create",
+          "arguments": {
+            "title": "Проверка релиза",
+            "text": "Сверить список задач"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "x2-reminder",
+          "name": "reminder_create",
+          "arguments": {
+            "text": "Сверить список задач",
+            "when": "завтра в 10:00"
+          }
+        }
+      ]
+    },
+    {
+      "content": "Заметку сохранила и поставила напоминание на завтра."
+    }
+  ]
+}

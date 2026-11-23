@@ -1,0 +1,47 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {
+      "tool_calls": [
+        {
+          "id": "x1-discover",
+          "name": "tool_search",
+          "arguments": {
+            "names": [
+              "write_file",
+              "list_dir"
+            ],
+            "query": "Найти подходящие инструменты для запроса пользователя"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "x1-write",
+          "name": "write_file",
+          "arguments": {
+            "path": "action.txt",
+            "content": "step complete"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "x1-list",
+          "name": "list_dir",
+          "arguments": {
+            "path": "."
+          }
+        }
+      ]
+    },
+    {
+      "content": "Создала action.txt и проверила его в папке."
+    }
+  ]
+}

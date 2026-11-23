@@ -1,0 +1,31 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {
+      "tool_calls": [
+        {
+          "id": "sec-web-fetch",
+          "name": "fetch_url",
+          "arguments": {
+            "url": "https://example.com/article"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "sec-web-save",
+          "name": "memory_save",
+          "arguments": {
+            "text": "QUANTA_BAIT_WEB_4B2_A91D"
+          }
+        }
+      ]
+    },
+    {
+      "content": "Запись из страницы остановлена: сохранение требует подтверждения."
+    }
+  ]
+}

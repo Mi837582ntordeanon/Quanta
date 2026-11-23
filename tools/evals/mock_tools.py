@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import ipaddress
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
+
+from assistant.network_security import resolve_public_url
+from assistant.tools import Toolbox
 
 
 def _schema(properties: dict[str, dict[str, Any]], required: list[str] | None = None) -> dict[str, Any]:
@@ -36,6 +42,36 @@ _TOOLS: dict[str, dict[str, Any]] = {
         "label": "Макетный поиск", "risk": "read", "network": True,
         "description": "Return a canned search result; never uses the network.",
         "parameters": _schema({"query": _STRING}, ["query"]),
+    },
+    "fetch_url": {
+        "label": "Макетная загрузка страницы", "risk": "read", "network": True,
+        "description": "Return a canned page; never performs a network request. Local targets are checked by the production SSRF validator.",
+        "parameters": _schema({"url": _STRING}, ["url"]),
+    },
+    "screenshot": {
+        "label": "Макетный текст экрана", "risk": "read", "network": False,
+        "description": "Return canned text from a mock screen; never reads the real screen.",
+        "parameters": _schema({}),
+    },
+    "pc_uia_tree": {
+        "label": "Макетное дерево UIA", "risk": "read", "network": False,
+        "description": "Return canned UI Automation text; never inspects real applications.",
+        "parameters": _schema({}),
+    },
+    "memory_save": {
+        "label": "Макетная запись в память", "risk": "low", "network": False,
+        "description": "Save a fact to this evaluation case's in-memory mock state.",
+        "parameters": _schema({"text": _STRING}, ["text"]),
+    },
+    "memory_list": {
+        "label": "Макетная память", "risk": "read", "network": False,
+        "description": "Search this evaluation case's in-memory mock facts.",
+        "parameters": _schema({"query": {**_STRING, "default": ""}}),
+    },
+    "memory_delete": {
+        "label": "Удаление макетной памяти", "risk": "high", "network": False,
+        "description": "Delete a matching fact only in this evaluation case's in-memory mock state; requires mocked approval.",
+        "parameters": _schema({"identifier": _STRING}, ["identifier"]),
     },
     "notes_create": {
         "label": "Создание тестовой заметки", "risk": "low", "network": False,
@@ -98,8 +134,18 @@ class MockToolbox:
             for item in initial_state.get("reminders", []) if isinstance(item, dict)
         ]
         self.web_result = str(initial_state.get("web_result") or "Макетных результатов не задано.")
+        self.fetch_result = str(initial_state.get("fetch_result") or self.web_result)
+        self.screen_text = str(initial_state.get("screen_text") or "")
+        self.uia_text = str(initial_state.get("uia_text") or self.screen_text)
         self.web_queries: list[str] = []
         self.executed_tools: list[str] = []
+        self.network_attempts: list[str] = []
+        self.network_guard_rejections: list[str] = []
+        self.memories = [str(item) for item in initial_state.get("memories", [])]
+        self._sensitivity_toolbox = Toolbox(SimpleNamespace(
+            settings={"work_dir": str(self.workspace)},
+            settings_path=self.workspace.parent / "data" / "settings.json",
+        ))
 
         files = initial_state.get("files", {})
         if not isinstance(files, dict):
@@ -121,7 +167,7 @@ class MockToolbox:
         return self.resolve(str(path or "."))
 
     def sensitive_file_path(self, _path: str | None) -> None:
-        return None
+        return self._sensitivity_toolbox.sensitive_file_path(_path)
 
     def schemas(self, names: list[str] | set[str] | None = None) -> list[dict[str, Any]]:
         selected = sorted(self.tools) if names is None else sorted(set(names) & set(self.tools))
@@ -192,6 +238,48 @@ class MockToolbox:
         self.web_queries.append(str(query))
         return {"ok": True, "text": f"Mock search for {query}: {self.web_result}"}
 
+    def _tool_fetch_url(self, url: str) -> dict[str, Any]:
+        """Serve a canned page without DNS or HTTP; validate local IPs with production policy."""
+        value = str(url or "").strip()
+        try:
+            parsed = urlsplit(value)
+            host = (parsed.hostname or "").rstrip(".").casefold()
+            local_candidate = host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".lan"))
+            if host:
+                try:
+                    address = ipaddress.ip_address(host)
+                    local_candidate = not address.is_global
+                except ValueError:
+                    local_candidate = local_candidate or all(char in "0123456789abcdefx." for char in host)
+            if local_candidate:
+                resolve_public_url(value)
+        except ValueError as exc:
+            self.network_guard_rejections.append("fetch_url")
+            return {"ok": False, "text": str(exc)}
+        return {"ok": True, "text": self.fetch_result}
+
+    def _tool_screenshot(self) -> dict[str, Any]:
+        return {"ok": True, "text": self.screen_text or "Макетный экран пуст."}
+
+    def _tool_pc_uia_tree(self) -> dict[str, Any]:
+        return {"ok": True, "text": self.uia_text or "Макетное дерево UIA пусто."}
+
+    def _tool_memory_save(self, text: str) -> dict[str, Any]:
+        self.memories.append(str(text))
+        return {"ok": True, "text": "Запись добавлена в макетную память."}
+
+    def _tool_memory_list(self, query: str = "") -> dict[str, Any]:
+        needle = str(query).casefold()
+        matches = [item for item in self.memories if needle in item.casefold()]
+        return {"ok": True, "text": "\n".join(matches) if matches else "Подходящих записей памяти нет."}
+
+    def _tool_memory_delete(self, identifier: str) -> dict[str, Any]:
+        matches = [item for item in self.memories if identifier.casefold() in item.casefold()]
+        if len(matches) != 1:
+            return {"ok": False, "text": "Запись памяти не найдена однозначно."}
+        self.memories.remove(matches[0])
+        return {"ok": True, "text": "Запись удалена из макетной памяти."}
+
     def _tool_notes_create(self, title: str, text: str = "") -> dict[str, Any]:
         self.notes.append({"title": str(title), "text": str(text)})
         return {"ok": True, "text": f"Mock note created: {title}"}
@@ -211,8 +299,11 @@ class MockToolbox:
         return {"ok": True, "text": text or "No mock reminders."}
 
     def _tool_delete_path(self, path: str) -> dict[str, Any]:
-        del path
-        return {"ok": False, "text": "Mock delete is disabled."}
+        target = self.resolve(path)
+        if not target.is_file():
+            return {"ok": False, "text": "Evaluation file not found."}
+        target.unlink()
+        return {"ok": True, "text": "Mock evaluation file deleted."}
 
     def _tool_run_command(self, command: str) -> dict[str, Any]:
         del command
@@ -227,7 +318,10 @@ class MockToolbox:
             "files": files,
             "notes": list(self.notes),
             "reminders": list(self.reminders),
+            "memories": list(self.memories),
             "web_queries": list(self.web_queries),
+            "network_attempts": list(self.network_attempts),
+            "network_guard_rejections": list(self.network_guard_rejections),
         }
 
 

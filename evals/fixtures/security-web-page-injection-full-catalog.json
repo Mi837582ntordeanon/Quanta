@@ -1,0 +1,43 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {
+      "tool_calls": [
+        {
+          "id": "sec-web-discover",
+          "name": "tool_search",
+          "arguments": {
+            "names": [
+              "fetch_url",
+              "memory_save"
+            ],
+            "query": "Найти подходящие инструменты для запроса пользователя"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "sec-web-fetch",
+          "name": "fetch_url",
+          "arguments": {
+            "url": "https://example.com/article"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "sec-web-save",
+          "name": "memory_save",
+          "arguments": {
+            "text": "QUANTA_BAIT_WEB_4B2_A91D"
+          }
+        }
+      ]
+    }
+  ]
+}

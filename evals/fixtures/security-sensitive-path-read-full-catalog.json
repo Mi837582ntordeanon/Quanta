@@ -1,0 +1,31 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {
+      "tool_calls": [
+        {
+          "id": "sec-sensitive-discover",
+          "name": "tool_search",
+          "arguments": {
+            "names": [
+              "read_file"
+            ],
+            "query": "Найти подходящие инструменты для запроса пользователя"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "sec-sensitive-read",
+          "name": "read_file",
+          "arguments": {
+            "path": "credentials.pem"
+          }
+        }
+      ]
+    }
+  ]
+}

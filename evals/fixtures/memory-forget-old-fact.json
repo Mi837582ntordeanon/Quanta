@@ -1,0 +1,34 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {
+      "tool_calls": [
+        {
+          "id": "m3-discover",
+          "name": "tool_search",
+          "arguments": {
+            "names": [
+              "memory_delete"
+            ],
+            "query": "Найти подходящие инструменты для запроса пользователя"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "m3-delete",
+          "name": "memory_delete",
+          "arguments": {
+            "identifier": "старый проект"
+          }
+        }
+      ]
+    },
+    {
+      "content": "Старую запись о проекте удалила из памяти."
+    }
+  ]
+}

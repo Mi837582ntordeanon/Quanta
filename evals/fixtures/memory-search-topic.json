@@ -1,0 +1,34 @@
+{
+  "fixture_version": 1,
+  "model": "scripted",
+  "responses": [
+    {
+      "tool_calls": [
+        {
+          "id": "m2-discover",
+          "name": "tool_search",
+          "arguments": {
+            "names": [
+              "memory_list"
+            ],
+            "query": "Найти подходящие инструменты для запроса пользователя"
+          }
+        }
+      ]
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "m2-search",
+          "name": "memory_list",
+          "arguments": {
+            "query": "короткие сводки"
+          }
+        }
+      ]
+    },
+    {
+      "content": "В памяти есть предпочтение коротких сводок при обзоре новостей."
+    }
+  ]
+}
